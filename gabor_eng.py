@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from skimage.filters import gabor
 from typing import Iterable, Sequence
+from HoI import compute_histogram_intersection_metric
 
 
 def to_numpy(data):
@@ -115,8 +116,10 @@ def compute_scores(train_features_path: str, eval_features_path: str) -> None:
     lda_score = probs[np.arange(len(y_eval)), y_eval].mean()
     logits = X_eval @ lda.coef_.T + lda.intercept_
     energy = Energy_Score(logits, percent=100, tail="bot")
+    hoi_score = compute_histogram_intersection_metric(logits, y_eval, num_bins=50)
     print(f"LDA Score: {lda_score}")
     print(f"Energy Score (Full): {energy}")
+    print(f"HoI Score: {hoi_score}")
 
 
 def compute_gabor_scores(train_features_path: str, eval_features_path: str) -> None:
@@ -135,5 +138,7 @@ def compute_gabor_scores(train_features_path: str, eval_features_path: str) -> N
     lda.fit(X_train_gabor, y_train)
     logits = X_eval_gabor @ lda.coef_.T + lda.intercept_
     energy = Energy_Score(logits, percent=100, tail="bot")
+    hoi_score = compute_histogram_intersection_metric(logits, y_eval, num_bins=50)
     print(f"Gabor Energy Score (Full): {energy}")
+    print(f"Gabor HoI Score: {hoi_score}")
 
