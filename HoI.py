@@ -656,18 +656,22 @@ class LDA:
         return X
 
 # Function to plot and save histograms
-def plot_and_save_histograms(embeddings, labels, save_path="histogram.png"):
+def plot_and_save_histograms(embeddings, labels, save_path="histogram.png", num_bins=50):
     classes = np.unique(labels)
     colors = plt.cm.tab10.colors  # Use a colormap for distinct colors
+
+    global_min = embeddings.min()
+    global_max = embeddings.max()
+    bin_edges = np.linspace(global_min, global_max, num_bins + 1)
 
     plt.figure(figsize=(14, 8))  # Increased figure size for better readability
 
     for i, cls in enumerate(classes):
         class_embeddings = embeddings[labels == cls]
-        hist, bin_edges = np.histogram(class_embeddings.flatten(), bins=50, density=True)
-        
+        hist, _ = np.histogram(class_embeddings.flatten(), bins=bin_edges, density=True)
+
         plt.hist(
-            bin_edges[:-1], bins=bin_edges, weights=hist, alpha=0.75, 
+            bin_edges[:-1], bins=bin_edges, weights=hist, alpha=0.75,
             label=f"Class {cls}", color=colors[i % len(colors)]
         )
 
@@ -687,13 +691,33 @@ def plot_and_save_histograms(embeddings, labels, save_path="histogram.png"):
     plt.close()
     print(f"Histogram saved to {save_path}")
 
+
+def compute_histogram_intersection_metric(embeddings, labels, num_bins=50):
+    global_min = embeddings.min()
+    global_max = embeddings.max()
+    bin_edges = np.linspace(global_min, global_max, num_bins + 1)
+
+    classes = np.unique(labels)
+    histograms = []
+    for cls in classes:
+        class_embeddings = embeddings[labels == cls]
+        hist, _ = np.histogram(class_embeddings.flatten(), bins=bin_edges, density=True)
+        histograms.append(hist)
+
+    intersections = []
+    for i in range(len(histograms)):
+        for j in range(i + 1, len(histograms)):
+            intersections.append(np.sum(np.minimum(histograms[i], histograms[j])))
+
+    average_intersection = np.mean(intersections) if intersections else 0.0
+    return 1.0 - average_intersection
+
 # Function to process each model and compute histograms
-def compute_and_visualize_histograms(test_features_path, save_path):
+def compute_and_visualize_histograms(test_features_path, save_path, num_bins=50):
     try:
         # Load test features and labels
         test_data = torch.load(test_features_path)
 
-        # Handle different data formats
         def to_numpy(data):
             if isinstance(data, torch.Tensor):
                 return data.numpy()
@@ -705,22 +729,23 @@ def compute_and_visualize_histograms(test_features_path, save_path):
         test_feats_np = to_numpy(test_data['embeddings'])
         test_labels_np = to_numpy(test_data['labels'])
 
-        # Fit LDA and transform embeddings
         lda = LDA(shrinkage=0.1)
         lda.fit(test_feats_np, test_labels_np)
         embeddings = np.dot(test_feats_np, lda.coef_.T) + lda.intercept_
 
-        # Plot and save histograms
-        plot_and_save_histograms(embeddings, test_labels_np, save_path=save_path)
+        plot_and_save_histograms(embeddings, test_labels_np, save_path=save_path, num_bins=num_bins)
+        score = compute_histogram_intersection_metric(embeddings, test_labels_np, num_bins=num_bins)
+        print(f"Histogram Intersection Score: {score}")
 
     except Exception as e:
         print(f"Error processing {test_features_path}: {e}")
 
 # Iterate over all models and generate histograms
-for model_name, model_path in model_paths.items():
-    save_path = f"histograms_slide_{model_name}.png"
-    print(f"Processing model: {model_name}")
-    compute_and_visualize_histograms(model_path, save_path)
+if __name__ == "__main__":
+    for model_name, model_path in model_paths.items():
+        save_path = f"histograms_slide_{model_name}.png"
+        print(f"Processing model: {model_name}")
+        compute_and_visualize_histograms(model_path, save_path)
 
 
 

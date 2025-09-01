@@ -423,8 +423,9 @@ def compute_gabor_features(features, frequencies=[0.1, 0.2, 0.3]):
         image = padded_feature.reshape(dim, dim)
         image_feats = []
         for freq in frequencies:
-            _, gabor_resp = gabor(image, frequency=freq)
-            image_feats.append(gabor_resp.flatten())
+            real, imag = gabor(image, frequency=freq)
+            magnitude = np.sqrt(real ** 2 + imag ** 2)
+            image_feats.append(magnitude.flatten())
         gabor_feats.append(np.concatenate(image_feats))
     return np.array(gabor_feats)
 
@@ -462,7 +463,7 @@ def compute_gabor_scores(test_features_path):
 
     # Full Energy Score
     full_energy_score = Energy_Score(logits_torch, percent=100, tail='bot')
-    print(f"Gabor Energy Score (Full): {1/full_energy_score}")
+    print(f"Gabor Energy Score (Full): {full_energy_score}")
 
 # Model Paths
 # model_paths = {
