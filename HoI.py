@@ -1,10 +1,25 @@
 import torch
+from typing import Any
 
 
-def compute_histograms(embeddings: torch.Tensor, labels: torch.Tensor, num_bins: int = 50, device: str = "cpu"):
-    """Compute class-wise histograms on the specified device."""
-    embeddings = embeddings.to(device)
-    labels = labels.to(device)
+def _to_tensor(data: Any, device: str) -> torch.Tensor:
+    """Convert ``data`` to a :class:`~torch.Tensor` on ``device``."""
+    if isinstance(data, torch.Tensor):
+        return data.to(device)
+    return torch.as_tensor(data, device=device)
+
+
+def compute_histograms(embeddings: Any, labels: Any, num_bins: int = 50, device: str = "cpu"):
+    """Compute class-wise histograms on the specified device.
+
+    Parameters
+    ----------
+    embeddings, labels:
+        Input data that can be a tensor or NumPy array. Both are converted to
+        tensors residing on ``device``.
+    """
+    embeddings = _to_tensor(embeddings, device)
+    labels = _to_tensor(labels, device)
     classes = torch.unique(labels)
     class_histograms = {}
     bin_edges = None
@@ -20,8 +35,8 @@ def histogram_intersection(hist1: torch.Tensor, hist2: torch.Tensor) -> torch.Te
 
 
 def compute_histogram_intersection_metric(
-    embeddings: torch.Tensor,
-    labels: torch.Tensor,
+    embeddings: Any,
+    labels: Any,
     num_bins: int = 50,
     device: str = "cpu",
 ) -> float:
