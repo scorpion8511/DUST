@@ -1,7 +1,9 @@
 import numpy as np
 import torch
 from skimage.filters import gabor
-from typing import Iterable, Sequence
+from typing import Dict, Iterable, Sequence
+from scipy.stats import weightedtau
+
 from HoI import compute_histogram_intersection_metric
 
 
@@ -123,7 +125,12 @@ def compute_scores(train_features_path: str, eval_features_path: str) -> None:
 
 
 def compute_gabor_scores(train_features_path: str, eval_features_path: str) -> None:
-    """Compute energy score using Gabor features for local texture."""
+    """Compute energy and HoI scores using Gabor features.
+
+    Returns a dictionary with individual metrics and their simple sum for
+    downstream ranking.
+    """
+
     train = torch.load(train_features_path)
     evald = torch.load(eval_features_path)
     X_train = to_numpy(train["embeddings"])
@@ -141,48 +148,171 @@ def compute_gabor_scores(train_features_path: str, eval_features_path: str) -> N
     hoi_score = compute_histogram_intersection_metric(logits, y_eval, num_bins=50)
     print(f"Gabor Energy Score (Full): {energy}")
     print(f"Gabor HoI Score: {hoi_score}")
+    return {"energy": energy, "hoi": hoi_score, "combined": energy + hoi_score}
 
 
-def compute_scores_for_all_models(model_paths):
-    """Iterate over multiple models and compute Gabor-based scores."""
+def compute_scores_for_all_models(model_paths: Dict[str, Sequence[str]]) -> Dict[str, float]:
+    """Iterate over models and collect combined Gabor scores.
+
+    Returns a mapping from model name to the summed energy+HoI score used for
+    ranking.
+    """
+
+    results: Dict[str, float] = {}
     for model_name, paths in model_paths.items():
         print(f"\nProcessing model: {model_name}")
         try:
             if isinstance(paths, (tuple, list)) and len(paths) == 2:
                 train_path, eval_path = paths
             else:
-                # Fallback: use the same path for both training and evaluation
                 train_path = eval_path = paths
             print(f"Training features: {train_path}")
             print(f"Evaluation features: {eval_path}")
-            compute_gabor_scores(train_path, eval_path)
+            scores = compute_gabor_scores(train_path, eval_path)
+            results[model_name] = scores["combined"]
         except Exception as e:
             print(f"Error processing model {model_name}: {e}")
+    return results
+
+
+def compute_scores_for_all_datasets(
+    dataset_model_paths: Dict[str, Dict[str, Sequence[str]]]
+) -> Dict[str, Dict[str, float]]:
+    """Compute scores for every dataset and its associated models."""
+
+    dataset_results: Dict[str, Dict[str, float]] = {}
+    for dataset, model_paths in dataset_model_paths.items():
+        print(f"\n=== Dataset: {dataset} ===")
+        dataset_results[dataset] = compute_scores_for_all_models(model_paths)
+    return dataset_results
+
+
+def compute_weighted_kendall_tau(
+    scores: Dict[str, float], ground_truth: Dict[str, float]
+) -> float:
+    """Compute weighted Kendall tau between predicted and true scores."""
+
+    common = [m for m in scores if m in ground_truth]
+    pred = [scores[m] for m in common]
+    truth = [ground_truth[m] for m in common]
+    tau, _ = weightedtau(pred, truth)
+    return tau
+
+
+def compute_kendall_tau_across_datasets(
+    all_scores: Dict[str, Dict[str, float]],
+    ground_truth: Dict[str, Dict[str, float]],
+) -> Dict[str, float]:
+    """Compute weighted Kendall tau for each dataset."""
+
+    taus: Dict[str, float] = {}
+    for dataset, scores in all_scores.items():
+        if dataset in ground_truth:
+            tau = compute_weighted_kendall_tau(scores, ground_truth[dataset])
+            taus[dataset] = tau
+            print(f"Kendall tau_w for {dataset}: {tau}")
+    return taus
 
 
 if __name__ == "__main__":
-    model_paths = {
-        "uni": (
-            "/home/jovyan/work/tran_est/saved_models_and_features_uni_lc02/uni_vit_large_patch16_pretrained_features.pth",
-            "/home/jovyan/work/tran_est/saved_models_and_features_uni_lc02/uni_vit_large_patch16_pretrained_features.pth",
-        ),
-        "conch": (
-            "/home/jovyan/work/tran_est/saved_models_and_features_conch_lc01/conch_ViT-B-16_pretrained_features.pth",
-            "/home/jovyan/work/tran_est/saved_models_and_features_conch_lc01/conch_ViT-B-16_pretrained_features.pth",
-        ),
-        "giga": (
-            "/home/jovyan/work/tran_est/saved_models_and_features_giga_lc02/giga_model_vit_large_patch16_224_pretrained_features.pth",
-            "/home/jovyan/work/tran_est/saved_models_and_features_giga_lc02/giga_model_vit_large_patch16_224_pretrained_features.pth",
-        ),
-        "phikon": (
-            "/home/jovyan/work/tran_est/saved_models_and_features_phikon_lc02/phikon_v2_train_features.pth",
-            "/home/jovyan/work/tran_est/saved_models_and_features_phikon_lc02/phikon_v2_train_features.pth",
-        ),
-        "virchow": (
-            "/home/jovyan/work/tran_est/saved_models_and_features_vir_lc02/Virchow2_pretrained_features.pth",
-            "/home/jovyan/work/tran_est/saved_models_and_features_vir_lc02/Virchow2_pretrained_features.pth",
-        ),
+    dataset_model_paths = {
+        "dhmc_lung": {
+            "uni": (
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/uni_dhmc_lung.pth",
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/uni_dhmc_lung.pth",
+            ),
+            "conch": (
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/conch_dhmc_lung.pth",
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/conch_dhmc_lung.pth",
+            ),
+            "giga": (
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/giga_dhmc_lung.pth",
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/giga_dhmc_lung.pth",
+            ),
+            "phikon": (
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/phikon_dhmc_lung.pth",
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/phikon_dhmc_lung.pth",
+            ),
+            "virchow": (
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/vir_dhmc_lung.pth",
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/vir_dhmc_lung.pth",
+            ),
+        },
+        "cam": {
+            "uni": (
+                "/home/jovyan/work/PSE_CAM/cam_pth/uni_cam.pth",
+                "/home/jovyan/work/PSE_CAM/cam_pth/uni_cam.pth",
+            ),
+            "conch": (
+                "/home/jovyan/work/PSE_CAM/cam_pth/conch_cam.pth",
+                "/home/jovyan/work/PSE_CAM/cam_pth/conch_cam.pth",
+            ),
+            "giga": (
+                "/home/jovyan/work/PSE_CAM/cam_pth/giga_cam.pth",
+                "/home/jovyan/work/PSE_CAM/cam_pth/giga_cam.pth",
+            ),
+            "phikon": (
+                "/home/jovyan/work/PSE_CAM/cam_pth/phikon_cam.pth",
+                "/home/jovyan/work/PSE_CAM/cam_pth/phikon_cam.pth",
+            ),
+            "virchow": (
+                "/home/jovyan/work/PSE_CAM/cam_pth/vir_cam.pth",
+                "/home/jovyan/work/PSE_CAM/cam_pth/vir_cam.pth",
+            ),
+        },
+        "bracs": {
+            "uni": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_uni_bracs01/uni_vit_large_patch16_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_uni_bracs01/uni_vit_large_patch16_pretrained_features.pth",
+            ),
+            "conch": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_conch_bracs01/conch_ViT-B-16_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_conch_bracs01/conch_ViT-B-16_pretrained_features.pth",
+            ),
+            "giga": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_giga_bracs01/giga_model_vit_large_patch16_224_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_giga_bracs01/giga_model_vit_large_patch16_224_pretrained_features.pth",
+            ),
+            "phikon": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_phikon_bracs00/phikon_v2_train_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_phikon_bracs00/phikon_v2_train_features.pth",
+            ),
+            "virchow": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_vir_bracs01/Virchow2_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_vir_bracs01/Virchow2_pretrained_features.pth",
+            ),
+        },
+        "bach": {
+            "uni": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_uni_bach01/uni_vit_large_patch16_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_uni_bach01/uni_vit_large_patch16_pretrained_features.pth",
+            ),
+            "conch": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_conch_bach01/conch_ViT-B-16_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_conch_bach01/conch_ViT-B-16_pretrained_features.pth",
+            ),
+            "giga": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_giga_bach01/giga_model_vit_large_patch16_224_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_giga_bach01/giga_model_vit_large_patch16_224_pretrained_features.pth",
+            ),
+            "phikon": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_phikon_bach01/phikon_v2_train_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_phikon_bach01/phikon_v2_train_features.pth",
+            ),
+            "virchow": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_vir_bach01/Virchow2_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_vir_bach01/Virchow2_pretrained_features.pth",
+            ),
+        },
     }
 
-    compute_scores_for_all_models(model_paths)
+    scores = compute_scores_for_all_datasets(dataset_model_paths)
+
+    # Example ground-truth accuracies for computing Kendall tau; replace with real
+    # evaluation results when available.
+    # ground_truth = {
+    #     "dhmc_lung": {"uni": 0.0, "conch": 0.0, "giga": 0.0, "phikon": 0.0, "virchow": 0.0},
+    #     "cam": {...},
+    # }
+    # compute_kendall_tau_across_datasets(scores, ground_truth)
 
