@@ -142,3 +142,47 @@ def compute_gabor_scores(train_features_path: str, eval_features_path: str) -> N
     print(f"Gabor Energy Score (Full): {energy}")
     print(f"Gabor HoI Score: {hoi_score}")
 
+
+def compute_scores_for_all_models(model_paths):
+    """Iterate over multiple models and compute Gabor-based scores."""
+    for model_name, paths in model_paths.items():
+        print(f"\nProcessing model: {model_name}")
+        try:
+            if isinstance(paths, (tuple, list)) and len(paths) == 2:
+                train_path, eval_path = paths
+            else:
+                # Fallback: use the same path for both training and evaluation
+                train_path = eval_path = paths
+            print(f"Training features: {train_path}")
+            print(f"Evaluation features: {eval_path}")
+            compute_gabor_scores(train_path, eval_path)
+        except Exception as e:
+            print(f"Error processing model {model_name}: {e}")
+
+
+if __name__ == "__main__":
+    model_paths = {
+        "uni": (
+            "/home/jovyan/work/tran_est/saved_models_and_features_uni_lc02/uni_vit_large_patch16_pretrained_features.pth",
+            "/home/jovyan/work/tran_est/saved_models_and_features_uni_lc02/uni_vit_large_patch16_pretrained_features.pth",
+        ),
+        "conch": (
+            "/home/jovyan/work/tran_est/saved_models_and_features_conch_lc01/conch_ViT-B-16_pretrained_features.pth",
+            "/home/jovyan/work/tran_est/saved_models_and_features_conch_lc01/conch_ViT-B-16_pretrained_features.pth",
+        ),
+        "giga": (
+            "/home/jovyan/work/tran_est/saved_models_and_features_giga_lc02/giga_model_vit_large_patch16_224_pretrained_features.pth",
+            "/home/jovyan/work/tran_est/saved_models_and_features_giga_lc02/giga_model_vit_large_patch16_224_pretrained_features.pth",
+        ),
+        "phikon": (
+            "/home/jovyan/work/tran_est/saved_models_and_features_phikon_lc02/phikon_v2_train_features.pth",
+            "/home/jovyan/work/tran_est/saved_models_and_features_phikon_lc02/phikon_v2_train_features.pth",
+        ),
+        "virchow": (
+            "/home/jovyan/work/tran_est/saved_models_and_features_vir_lc02/Virchow2_pretrained_features.pth",
+            "/home/jovyan/work/tran_est/saved_models_and_features_vir_lc02/Virchow2_pretrained_features.pth",
+        ),
+    }
+
+    compute_scores_for_all_models(model_paths)
+
