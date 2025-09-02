@@ -58,6 +58,10 @@ class LDA:
         self.intercept_ = -0.5 * np.diag(means @ self.coef_.T) + np.log(self.priors_)
         return self
 
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        """Project data into discriminant space."""
+        return X @ self.scalings_
+
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         logits = X @ self.coef_.T + self.intercept_
         logits -= logits.max(axis=1, keepdims=True)
@@ -122,7 +126,8 @@ def compute_scores(train_features_path: str, eval_features_path: str) -> None:
     lda_score = probs[np.arange(len(y_eval)), y_eval].mean()
     logits = X_eval @ lda.coef_.T + lda.intercept_
     energy = Energy_Score(logits, percent=100, tail="bot")
-    hoi_score = compute_histogram_intersection_metric(logits, y_eval, num_bins=50)
+    proj = lda.transform(X_eval)[:, 0]
+    hoi_score = compute_histogram_intersection_metric(proj, y_eval, num_bins=50)
     print(f"LDA Score: {lda_score}")
     print(f"Energy Score (Full): {energy}")
     print(f"HoI Score: {hoi_score}")
@@ -149,7 +154,8 @@ def compute_gabor_scores(train_features_path: str, eval_features_path: str) -> N
     lda.fit(X_train_gabor, y_train)
     logits = X_eval_gabor @ lda.coef_.T + lda.intercept_
     energy = Energy_Score(logits, percent=100, tail="bot")
-    hoi_score = compute_histogram_intersection_metric(logits, y_eval, num_bins=50)
+    proj = lda.transform(X_eval_gabor)[:, 0]
+    hoi_score = compute_histogram_intersection_metric(proj, y_eval, num_bins=50)
     print(f"Gabor Energy Score (Full): {energy}")
     print(f"Gabor HoI Score: {hoi_score}")
     return {"energy": energy, "hoi": hoi_score, "combined": energy + hoi_score}

@@ -41,9 +41,14 @@ class LDA:
 
         evals, evecs = np.linalg.eigh(np.linalg.pinv(Sw).dot(Sb))
         evecs = evecs[:, np.argsort(evals)[::-1]]
+        self.scalings_ = evecs
         self.coef_ = means @ evecs @ evecs.T
         self.intercept_ = -0.5 * np.diag(means @ self.coef_.T) + np.log(self.priors_)
         return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        """Project data into discriminant space."""
+        return X @ self.scalings_
 
 
 def compute_histograms(
@@ -51,11 +56,12 @@ def compute_histograms(
     labels: np.ndarray,
     num_bins: int = 50,
 ) -> Tuple[Dict[int, np.ndarray], np.ndarray]:
-    bin_edges = np.histogram(embeddings.flatten(), bins=num_bins, density=True)[1]
+    """Compute class-wise histograms with shared bin edges."""
+    bin_edges = np.histogram(embeddings, bins=num_bins, density=True)[1]
     class_histograms: Dict[int, np.ndarray] = {}
     for cls in np.unique(labels):
         class_emb = embeddings[labels == cls]
-        hist, _ = np.histogram(class_emb.flatten(), bins=bin_edges, density=True)
+        hist, _ = np.histogram(class_emb, bins=bin_edges, density=True)
         class_histograms[int(cls)] = hist
     return class_histograms, bin_edges
 
@@ -69,6 +75,8 @@ def compute_histogram_intersection_metric(
     labels: np.ndarray,
     num_bins: int = 50,
 ) -> float:
+    """Return 1 - average histogram intersection across class pairs."""
+    embeddings = (embeddings - embeddings.mean()) / (embeddings.std() or 1.0)
     class_histograms, _ = compute_histograms(embeddings, labels, num_bins=num_bins)
     classes = list(class_histograms.keys())
     scores = []
@@ -98,9 +106,9 @@ def compute_scores_for_all_models(
 
             lda = LDA(shrinkage=0.1)
             lda.fit(X_train, y_train)
-            embeddings = X_eval @ lda.coef_.T + lda.intercept_
+            proj = lda.transform(X_eval)[:, 0]
             score = compute_histogram_intersection_metric(
-                embeddings, y_eval, num_bins=50
+                proj, y_eval, num_bins=50
             )
             print(
                 f"Histogram Intersection Confidence Score for {model_name}: {score}"
