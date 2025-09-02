@@ -1,525 +1,366 @@
-# import numpy as np
-# import torch
-# from scipy.linalg import inv
-# from numpy.linalg import eigh
-# from skimage.filters import gabor
-
-
-
-# # Utility Function to Convert NumPy Arrays to Torch Tensors
-# def to_torch(ndarray):
-#     from collections.abc import Sequence
-#     if ndarray is None:
-#         return None
-#     if isinstance(ndarray, Sequence):
-#         return [to_torch(ndarray_) for ndarray_ in ndarray if ndarray_ is not None]
-#     if type(ndarray).__module__ == 'numpy':
-#         return torch.from_numpy(ndarray)
-#     if torch.is_tensor(ndarray):
-#         return ndarray
-#     raise ValueError('Fail to convert')
-
-# # LDA Class
-# class LDA:
-#     def __init__(self, shrinkage=None, priors=None, n_components=None):
-#         self.shrinkage = shrinkage
-#         self.priors = priors
-#         self.n_components = n_components
-
-#     def _cov(self, X, shrinkage=-1):
-#         emp_cov = np.cov(np.asarray(X).T, bias=1)
-#         if shrinkage < 0:
-#             return emp_cov
-#         n_features = emp_cov.shape[0]
-#         mu = np.trace(emp_cov) / n_features
-#         shrunk_cov = (1.0 - shrinkage) * emp_cov
-#         shrunk_cov.flat[:: n_features + 1] += shrinkage * mu
-#         return shrunk_cov
-
-#     def softmax(self, X, copy=True):
-#         if copy:
-#             X = np.copy(X)
-#         max_prob = np.max(X, axis=1).reshape((-1, 1))
-#         X -= max_prob
-#         np.exp(X, X)
-#         sum_prob = np.sum(X, axis=1).reshape((-1, 1))
-#         X /= sum_prob
-#         return X
-
-#     def fit(self, X, y):
-#         self.classes_ = np.unique(y)
-#         n_classes = len(self.classes_)
-
-#         max_components = min(len(self.classes_) - 1, X.shape[1])
-#         if self.n_components is None:
-#             self._max_components = max_components
-#         else:
-#             if self.n_components > max_components:
-#                 raise ValueError(
-#                     "n_components cannot be larger than min(n_features, n_classes - 1)."
-#                 )
-#             self._max_components = self.n_components
-
-#         _, y_t = np.unique(y, return_inverse=True)
-#         self.priors_ = np.bincount(y_t) / float(len(y))
-#         self._solve_eigen(X, y, shrinkage=self.shrinkage)
-
-#         return self
-
-#     def _solve_eigen(self, X, y, shrinkage):
-#         classes, y = np.unique(y, return_inverse=True)
-#         cnt = np.bincount(y)
-
-#         means = np.zeros(shape=(len(classes), X.shape[1]))
-#         np.add.at(means, y, X)
-#         means /= cnt[:, None]
-#         self.means_ = means
-
-#         cov = np.zeros(shape=(X.shape[1], X.shape[1]))
-#         for idx, group in enumerate(classes):
-#             Xg = X[y == group, :]
-#             cov += self.priors_[idx] * np.atleast_2d(self._cov(Xg))
-#         self.covariance_ = cov
-
-#         Sw = self.covariance_
-#         if self.shrinkage is None:
-#             shrinkage = 0.1
-#         St = self._cov(X, shrinkage=shrinkage)
-
-#         n_features = Sw.shape[0]
-#         mu = np.trace(Sw) / n_features
-#         shrunk_Sw = (1.0 - shrinkage) * Sw
-#         shrunk_Sw.flat[:: n_features + 1] += shrinkage * mu
-
-#         Sb = St - shrunk_Sw
-
-#         evals, evecs = eigh(inv(shrunk_Sw).dot(Sb))
-#         evecs = evecs[:, np.argsort(evals)[::-1]]
-#         self.scalings_ = evecs
-#         self.coef_ = np.dot(self.means_, evecs).dot(evecs.T)
-#         self.intercept_ = -0.5 * np.diag(np.dot(self.means_, self.coef_.T)) + np.log(
-#             self.priors_
-#         )
-
-#     def predict_proba(self, X):
-#         logits = np.dot(X, self.coef_.T) + self.intercept_
-#         return self.softmax(logits)
-
-# # Energy Score Function
-# def Energy_Score(logits, percent, tail):
-#     logits = to_torch(logits)
-#     energy_score = torch.logsumexp(logits, dim=-1).numpy()
-#     if tail == 'bot':
-#         chs = list(np.argsort(energy_score)[: int(percent * len(energy_score) // 100)])
-#     else:
-#         chs = list(np.argsort(energy_score)[-int(percent * len(energy_score) // 100):])
-#     energy_score = energy_score[chs].mean()
-#     return energy_score
-
-# # Workflow for LDA and Energy Score Computation
-# def compute_scores(test_features_path):
-#     # Load test features and labels
-#     test_data = torch.load(test_features_path)
-
-#     # Handle differences in data format
-#     def to_numpy(data):
-#         if isinstance(data, torch.Tensor):
-#             return data.numpy()
-#         elif isinstance(data, np.ndarray):
-#             return data
-#         else:
-#             raise ValueError("Unsupported data type")
-
-#     test_feats_np = to_numpy(test_data['embeddings'])
-#     test_labels_np = to_numpy(test_data['labels'])
-
-#     # **LDA Score**
-#     lda = LDA(shrinkage=0.1)
-#     lda.fit(test_feats_np, test_labels_np)  # Use test data for fitting
-#     lda_probabilities = lda.predict_proba(test_feats_np)
-
-#     # Average probability of correct class
-#     lda_score = np.sum(lda_probabilities[np.arange(len(test_labels_np)), test_labels_np]) / len(test_labels_np)
-#     print(f"LDA Score: {lda_score}")
-
-#     # **Energy Score**
-#     logits = np.dot(test_feats_np, lda.coef_.T) + lda.intercept_
-#     logits_torch = torch.tensor(logits)
-
-#     # Full Energy Score
-#     full_energy_score = Energy_Score(logits_torch, percent=100, tail='bot')
-#     print(f"Energy Score (Full): {full_energy_score}")  
-
-# # Function to compute Gabor features for images
-# def pad_to_square(array):
-#     """
-#     Pads a 1D array to the nearest perfect square size.
-
-#     Parameters:
-#     - array: 1D NumPy array.
-
-#     Returns:
-#     - padded_array: Padded 1D array to make it a perfect square.
-#     """
-#     size = array.size
-#     next_square = int(np.ceil(np.sqrt(size)) ** 2)  # Find the nearest perfect square
-#     padded_array = np.zeros(next_square, dtype=array.dtype)  # Create a padded array
-#     padded_array[:size] = array  # Copy original array values
-#     return padded_array
-
-# def compute_gabor_features(features, frequencies=[0.1, 0.2, 0.3]):
-#     """
-#     Apply Gabor filters to extract texture features from embeddings.
-
-#     Parameters:
-#     - features: NumPy array of 1D image embeddings.
-#     - frequencies: List of Gabor filter frequencies.
-
-#     Returns:
-#     - gabor_feats: NumPy array of Gabor features for all images.
-#     """
-#     gabor_feats = []
-#     for feature in features:
-#         padded_feature = pad_to_square(feature)  # Pad the feature to make it a square
-#         dim = int(np.sqrt(padded_feature.size))  # Compute the dimension of the square
-#         image = padded_feature.reshape(dim, dim)  # Reshape the padded feature into 2D
-#         image_feats = []
-#         for freq in frequencies:
-#             _, gabor_resp = gabor(image, frequency=freq)
-#             image_feats.append(gabor_resp.flatten())  # Flatten the response for each frequency
-#         gabor_feats.append(np.concatenate(image_feats))  # Concatenate responses for all frequencies
-#     return np.array(gabor_feats)
-
-
-
-# # Workflow for LDA and Gabor Feature Score Computation
-# def compute_gabor_scores(test_features_path):
-#     # Load test features and labels
-#     test_data = torch.load(test_features_path)
-
-#     # Handle differences in data format
-#     def to_numpy(data):
-#         if isinstance(data, torch.Tensor):
-#             return data.numpy()
-#         elif isinstance(data, np.ndarray):
-#             return data
-#         else:
-#             raise ValueError("Unsupported data type")
-
-#     test_feats_np = to_numpy(test_data['embeddings'])
-#     test_labels_np = to_numpy(test_data['labels'])
-
-#     # Compute Gabor features from test embeddings
-#     gabor_features = compute_gabor_features(test_feats_np)
-
-#     # **LDA Score on Gabor Features**
-#     lda = LDA(shrinkage=0.1)
-#     lda.fit(gabor_features, test_labels_np)  # Use Gabor features for fitting
-#     lda_probabilities = lda.predict_proba(gabor_features)
-
-#     # Average probability of correct class
-#     lda_score = np.sum(lda_probabilities[np.arange(len(test_labels_np)), test_labels_np]) / len(test_labels_np)
-#     print(f"Gabor-LDA Score: {lda_score}")
-
-#     # **Energy Score on Gabor Features**
-#     logits = np.dot(gabor_features, lda.coef_.T) + lda.intercept_
-#     logits_torch = torch.tensor(logits)
-
-#     # Full Energy Score
-#     full_energy_score = Energy_Score(logits_torch, percent=100, tail='bot')
-#     print(f"Gabor Energy Score (Full): {full_energy_score}")
-
-# # Example Usage
-# # test_features_path =  "/home/jovyan/work/tran_est/saved_models_and_features_conch_brk01/conch_ViT-B-16_pretrained_features.pth"
-# # test_features_path =  "/home/jovyan/work/tran_est/saved_models_and_features_giga_brk01/giga_model_vit_large_patch16_224_pretrained_features.pth"
-# # test_features_path =  "/home/jovyan/work/tran_est/saved_models_and_features_phikon_brk01/phikon_v2_train_features.pth"
-
-# # test_features_path =  "/home/jovyan/work/tran_est/saved_models_and_features_uni_brk01/uni_vit_large_patch16_pretrained_features.pth"
-
-# # test_features_path =  "/home/jovyan/work/PSE_dhmc_kid/dhmc_kid_pth/giga_dhmc_kid.pth"
-# uni = "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/uni_dhmc_lung.pth"
-# conch= "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/conch_dhmc_lung.pth"
-# giga = "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/giga_dhmc_lung.pth"
-# phikon= "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/phikon_dhmc_lung.pth"
-# virchow = "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/vir_dhmc_lung.pth"
-
-
-
-
-
-# # test_features_path = "/home/jovyan/work/tran_est/saved_models_and_features_giga0005/giga_model_vit_large_patch16_224_pretrained_features.pth" # giga
-# # test_features_path = "/home/jovyan/work/tran_est/saved_models_and_features_phikon0005/phikon_v2_test_features.pth"  # phikon
-# # test_features_path = "/home/jovyan/work/tran_est/saved_models_and_features_uni_0005/uni_vit_large_patch16_pretrained_features.pth"  # uni
-
-
-
-# compute_gabor_scores(test_features_path)
-
-
-
 import numpy as np
 import torch
-from scipy.linalg import inv
-from numpy.linalg import eigh
 from skimage.filters import gabor
+from typing import Dict, Iterable, Sequence
+from scipy.stats import weightedtau
 
-# Utility Function to Convert NumPy Arrays to Torch Tensors
-def to_torch(ndarray):
-    from collections.abc import Sequence
-    if ndarray is None:
-        return None
-    if isinstance(ndarray, Sequence):
-        return [to_torch(ndarray_) for ndarray_ in ndarray if ndarray_ is not None]
-    if type(ndarray).__module__ == 'numpy':
-        return torch.from_numpy(ndarray)
-    if torch.is_tensor(ndarray):
-        return ndarray
-    raise ValueError('Fail to convert')
+from HoI import compute_histogram_intersection_metric
 
-# LDA Class
+
+def to_numpy(data):
+    """Convert tensors to CPU NumPy arrays.
+
+    Handles GPU tensors and those requiring gradients by detaching and moving
+    them to CPU before conversion.
+    """
+    if isinstance(data, np.ndarray):
+        return data
+    if torch.is_tensor(data):
+        return data.detach().cpu().numpy()
+    raise ValueError("Unsupported data type: %r" % type(data))
+
+
 class LDA:
-    def __init__(self, shrinkage=None, priors=None, n_components=None):
-        self.shrinkage = shrinkage
-        self.priors = priors
-        self.n_components = n_components
+    """Simple LDA with optional covariance shrinkage."""
 
-    def _cov(self, X, shrinkage=-1):
-        emp_cov = np.cov(np.asarray(X).T, bias=1)
-        if shrinkage < 0:
-            return emp_cov
+    def __init__(self, shrinkage: float = 0.1):
+        self.shrinkage = shrinkage
+
+    def _cov(self, X: np.ndarray) -> np.ndarray:
+        emp_cov = np.cov(X.T, bias=1)
         n_features = emp_cov.shape[0]
         mu = np.trace(emp_cov) / n_features
-        shrunk_cov = (1.0 - shrinkage) * emp_cov
-        shrunk_cov.flat[:: n_features + 1] += shrinkage * mu
+        shrunk_cov = (1.0 - self.shrinkage) * emp_cov
+        shrunk_cov.flat[:: n_features + 1] += self.shrinkage * mu
         return shrunk_cov
 
-    def softmax(self, X, copy=True):
-        if copy:
-            X = np.copy(X)
-        max_prob = np.max(X, axis=1).reshape((-1, 1))
-        X -= max_prob
-        np.exp(X, X)
-        sum_prob = np.sum(X, axis=1).reshape((-1, 1))
-        X /= sum_prob
-        return X
-
-    def fit(self, X, y):
-        self.classes_ = np.unique(y)
-        n_classes = len(self.classes_)
-
-        max_components = min(len(self.classes_) - 1, X.shape[1])
-        if self.n_components is None:
-            self._max_components = max_components
-        else:
-            if self.n_components > max_components:
-                raise ValueError(
-                    "n_components cannot be larger than min(n_features, n_classes - 1)."
-                )
-            self._max_components = self.n_components
-
-        _, y_t = np.unique(y, return_inverse=True)
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "LDA":
+        classes, y_t = np.unique(y, return_inverse=True)
         self.priors_ = np.bincount(y_t) / float(len(y))
-        self._solve_eigen(X, y, shrinkage=self.shrinkage)
+        self.classes_ = classes
 
-        return self
-
-    def _solve_eigen(self, X, y, shrinkage):
-        classes, y = np.unique(y, return_inverse=True)
-        cnt = np.bincount(y)
-
-        means = np.zeros(shape=(len(classes), X.shape[1]))
-        np.add.at(means, y, X)
-        means /= cnt[:, None]
+        means = np.zeros((len(classes), X.shape[1]))
+        np.add.at(means, y_t, X)
+        means /= np.bincount(y_t)[:, None]
         self.means_ = means
 
-        cov = np.zeros(shape=(X.shape[1], X.shape[1]))
+        Sw = np.zeros((X.shape[1], X.shape[1]))
         for idx, group in enumerate(classes):
-            Xg = X[y == group, :]
-            cov += self.priors_[idx] * np.atleast_2d(self._cov(Xg))
-        self.covariance_ = cov
+            Xg = X[y_t == idx]
+            Sw += self.priors_[idx] * self._cov(Xg)
+        St = self._cov(X)
+        Sb = St - Sw
 
-        Sw = self.covariance_
-        if self.shrinkage is None:
-            shrinkage = 0.1
-        St = self._cov(X, shrinkage=shrinkage)
-
-        n_features = Sw.shape[0]
-        mu = np.trace(Sw) / n_features
-        shrunk_Sw = (1.0 - shrinkage) * Sw
-        shrunk_Sw.flat[:: n_features + 1] += shrinkage * mu
-
-        Sb = St - shrunk_Sw
-
-        evals, evecs = eigh(inv(shrunk_Sw).dot(Sb))
+        evals, evecs = np.linalg.eigh(np.linalg.pinv(Sw).dot(Sb))
         evecs = evecs[:, np.argsort(evals)[::-1]]
         self.scalings_ = evecs
-        self.coef_ = np.dot(self.means_, evecs).dot(evecs.T)
-        self.intercept_ = -0.5 * np.diag(np.dot(self.means_, self.coef_.T)) + np.log(
-            self.priors_
-        )
+        self.coef_ = means @ evecs @ evecs.T
+        self.intercept_ = -0.5 * np.diag(means @ self.coef_.T) + np.log(self.priors_)
+        return self
 
-    def predict_proba(self, X):
-        logits = np.dot(X, self.coef_.T) + self.intercept_
-        return self.softmax(logits)
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        logits = X @ self.coef_.T + self.intercept_
+        logits -= logits.max(axis=1, keepdims=True)
+        exp = np.exp(logits)
+        return exp / exp.sum(axis=1, keepdims=True)
 
-# Energy Score Function
-def Energy_Score(logits, percent, tail):
-    logits = to_torch(logits)
-    energy_score = torch.logsumexp(logits, dim=-1).numpy()
-    if tail == 'bot':
-        chs = list(np.argsort(energy_score)[: int(percent * len(energy_score) // 100)])
-    else:
-        chs = list(np.argsort(energy_score)[-int(percent * len(energy_score) // 100):])
-    energy_score = energy_score[chs].mean()
-    return energy_score
 
-# Workflow for LDA and Energy Score Computation
-def compute_scores(test_features_path):
-    # Load test features and labels
-    test_data = torch.load(test_features_path)
+def Energy_Score(logits: Sequence[np.ndarray], percent: int = 100, tail: str = "bot") -> float:
+    """Compute mean energy score for selected percentile of samples."""
+    logits = torch.as_tensor(logits)
+    energy = torch.logsumexp(logits, dim=-1).numpy()
+    k = max(1, int(percent * len(energy) / 100))
+    idx = np.argsort(energy)
+    chosen = idx[:k] if tail == "bot" else idx[-k:]
+    return energy[chosen].mean()
 
-    # Handle differences in data format
-    def to_numpy(data):
-        if isinstance(data, torch.Tensor):
-            return data.numpy()
-        elif isinstance(data, np.ndarray):
-            return data
-        else:
-            raise ValueError("Unsupported data type")
 
-    test_feats_np = to_numpy(test_data['embeddings'])
-    test_labels_np = to_numpy(test_data['labels'])
-
-    # **LDA Score**
-    lda = LDA(shrinkage=0.1)
-    lda.fit(test_feats_np, test_labels_np)  # Use test data for fitting
-    lda_probabilities = lda.predict_proba(test_feats_np)
-
-    # Average probability of correct class
-    lda_score = np.sum(lda_probabilities[np.arange(len(test_labels_np)), test_labels_np]) / len(test_labels_np)
-    print(f"LDA Score: {lda_score}")
-
-    # **Energy Score**
-    logits = np.dot(test_feats_np, lda.coef_.T) + lda.intercept_
-    logits_torch = torch.tensor(logits)
-
-    # Full Energy Score
-    full_energy_score = Energy_Score(logits_torch, percent=100, tail='bot')
-    print(f"Energy Score (Full): {full_energy_score}")  
-
-# Function to compute Gabor features for images
-def pad_to_square(array):
+def pad_to_square(array: np.ndarray) -> np.ndarray:
     size = array.size
     next_square = int(np.ceil(np.sqrt(size)) ** 2)
-    padded_array = np.zeros(next_square, dtype=array.dtype)
-    padded_array[:size] = array
-    return padded_array
+    padded = np.zeros(next_square, dtype=array.dtype)
+    padded[:size] = array
+    return padded
 
-def compute_gabor_features(features, frequencies=[0.1, 0.2, 0.3]):
+
+def compute_gabor_features(
+    features: np.ndarray,
+    frequencies: Iterable[float] = (0.1, 0.2, 0.3),
+    orientations: Iterable[float] = (0.0,),
+) -> np.ndarray:
+    """Apply Gabor filters and return standardized magnitude responses."""
     gabor_feats = []
     for feature in features:
-        padded_feature = pad_to_square(feature)
-        dim = int(np.sqrt(padded_feature.size))
-        image = padded_feature.reshape(dim, dim)
-        image_feats = []
+        padded = pad_to_square(feature)
+        dim = int(np.sqrt(padded.size))
+        image = padded.reshape(dim, dim)
+        responses = []
         for freq in frequencies:
-            _, gabor_resp = gabor(image, frequency=freq)
-            image_feats.append(gabor_resp.flatten())
-        gabor_feats.append(np.concatenate(image_feats))
-    return np.array(gabor_feats)
+            for theta in orientations:
+                real, imag = gabor(image, frequency=freq, theta=theta)
+                magnitude = np.hypot(real, imag)
+                flat = magnitude.flatten()
+                if flat.std() > 0:
+                    flat = (flat - flat.mean()) / flat.std()
+                responses.append(flat)
+        gabor_feats.append(np.concatenate(responses))
+    return np.asarray(gabor_feats)
 
-# Workflow for LDA and Gabor Feature Score Computation
-def compute_gabor_scores(test_features_path):
-    # Load test features and labels
-    test_data = torch.load(test_features_path)
 
-    def to_numpy(data):
-        if isinstance(data, torch.Tensor):
-            return data.numpy()
-        elif isinstance(data, np.ndarray):
-            return data
-        else:
-            raise ValueError("Unsupported data type")
+def compute_scores(train_features_path: str, eval_features_path: str) -> None:
+    """Compute LDA accuracy and energy score using raw embeddings."""
+    train = torch.load(train_features_path)
+    evald = torch.load(eval_features_path)
+    X_train = to_numpy(train["embeddings"])
+    y_train = to_numpy(train["labels"])
+    X_eval = to_numpy(evald["embeddings"])
+    y_eval = to_numpy(evald["labels"])
 
-    test_feats_np = to_numpy(test_data['embeddings'])
-    test_labels_np = to_numpy(test_data['labels'])
-
-    # Compute Gabor features from test embeddings
-    gabor_features = compute_gabor_features(test_feats_np)
-
-    # **LDA Score on Gabor Features**
     lda = LDA(shrinkage=0.1)
-    lda.fit(gabor_features, test_labels_np)  # Use Gabor features for fitting
-    lda_probabilities = lda.predict_proba(gabor_features)
-
-    # Average probability of correct class
-    lda_score = np.sum(lda_probabilities[np.arange(len(test_labels_np)), test_labels_np]) / len(test_labels_np)
-    print(f"Gabor-LDA Score: {lda_score}")
-
-    # **Energy Score on Gabor Features**
-    logits = np.dot(gabor_features, lda.coef_.T) + lda.intercept_
-    logits_torch = torch.tensor(logits)
-
-    # Full Energy Score
-    full_energy_score = Energy_Score(logits_torch, percent=100, tail='bot')
-    print(f"Gabor Energy Score (Full): {1/full_energy_score}")
-
-# Model Paths
-# model_paths = {
-#     "uni": "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/uni_dhmc_lung.pth",
-#     "conch": "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/conch_dhmc_lung.pth",
-#     "giga": "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/giga_dhmc_lung.pth",
-#     "phikon": "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/phikon_dhmc_lung.pth",
-#     "virchow": "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/vir_dhmc_lung.pth",
-# }
+    lda.fit(X_train, y_train)
+    probs = lda.predict_proba(X_eval)
+    lda_score = probs[np.arange(len(y_eval)), y_eval].mean()
+    logits = X_eval @ lda.coef_.T + lda.intercept_
+    energy = Energy_Score(logits, percent=100, tail="bot")
+    hoi_score = compute_histogram_intersection_metric(logits, y_eval, num_bins=50)
+    print(f"LDA Score: {lda_score}")
+    print(f"Energy Score (Full): {energy}")
+    print(f"HoI Score: {hoi_score}")
 
 
-# model_paths = {
-#        "phikon": "/home/jovyan/work/PSE_IMP/imp_pth/giga_imp.pth",
-# }
+def compute_gabor_scores(train_features_path: str, eval_features_path: str) -> None:
+    """Compute energy and HoI scores using Gabor features.
 
-# model_paths = {
-#     "uni": "/home/jovyan/work/PSE_CAM/cam_pth/uni_cam.pth",
-#     "conch": "/home/jovyan/work/PSE_CAM/cam_pth/conch_cam.pth",
-#     "giga": "/home/jovyan/work/PSE_CAM/cam_pth/giga_cam.pth",
-#     "phikon": "/home/jovyan/work/PSE_CAM/cam_pth/phikon_cam.pth",
-#     "virchow": "/home/jovyan/work/PSE_CAM/cam_pth/vir_cam.pth",
-# }
+    Returns a dictionary with individual metrics and their simple sum for
+    downstream ranking.
+    """
 
-# model_paths = {
-#     "uni": "/home/jovyan/work/tran_est/saved_models_and_features_uni_bracs01/uni_vit_large_patch16_pretrained_features.pth",
-#     "conch": "/home/jovyan/work/tran_est/saved_models_and_features_conch_bracs01/conch_ViT-B-16_pretrained_features.pth",
-#     "giga": "/home/jovyan/work/tran_est/saved_models_and_features_giga_bracs01/giga_model_vit_large_patch16_224_pretrained_features.pth",
-#     "phikon": "/home/jovyan/work/tran_est/saved_models_and_features_phikon_bracs00/phikon_v2_train_features.pth",
-#     "virchow": "/home/jovyan/work/tran_est/saved_models_and_features_vir_bracs01/Virchow2_pretrained_features.pth",
-# }
+    train = torch.load(train_features_path)
+    evald = torch.load(eval_features_path)
+    X_train = to_numpy(train["embeddings"])
+    y_train = to_numpy(train["labels"])
+    X_eval = to_numpy(evald["embeddings"])
+    y_eval = to_numpy(evald["labels"])
 
-# model_paths = {
-#     "uni": "/home/jovyan/work/tran_est/saved_models_and_features_uni_bach01/uni_vit_large_patch16_pretrained_features.pth",
-#     "conch": "/home/jovyan/work/tran_est/saved_models_and_features_conch_bach01/conch_ViT-B-16_pretrained_features.pth",
-#     "giga": "/home/jovyan/work/tran_est/saved_models_and_features_giga_bach01/giga_model_vit_large_patch16_224_pretrained_features.pth",
-#     "phikon": "/home/jovyan/work/tran_est/saved_models_and_features_phikon_bach01/phikon_v2_train_features.pth",
-#     "virchow": "/home/jovyan/work/tran_est/saved_models_and_features_vir_bach01/Virchow2_pretrained_features.pth",
-# }
+    X_train_gabor = compute_gabor_features(X_train)
+    X_eval_gabor = compute_gabor_features(X_eval)
 
-model_paths = {
-    "uni": "/home/jovyan/work/tran_est/saved_models_and_features_uni_lc02/uni_vit_large_patch16_pretrained_features.pth",
-    "conch": "/home/jovyan/work/tran_est/saved_models_and_features_conch_lc01/conch_ViT-B-16_pretrained_features.pth",
-    "giga": "/home/jovyan/work/tran_est/saved_models_and_features_giga_lc02/giga_model_vit_large_patch16_224_pretrained_features.pth",
-    "phikon": "/home/jovyan/work/tran_est/saved_models_and_features_phikon_lc02/phikon_v2_train_features.pth",
-    "virchow": "/home/jovyan/work/tran_est/saved_models_and_features_vir_lc02/Virchow2_pretrained_features.pth",
-}
+    lda = LDA(shrinkage=0.1)
+    lda.fit(X_train_gabor, y_train)
+    logits = X_eval_gabor @ lda.coef_.T + lda.intercept_
+    energy = Energy_Score(logits, percent=100, tail="bot")
+    hoi_score = compute_histogram_intersection_metric(logits, y_eval, num_bins=50)
+    print(f"Gabor Energy Score (Full): {energy}")
+    print(f"Gabor HoI Score: {hoi_score}")
+    return {"energy": energy, "hoi": hoi_score, "combined": energy + hoi_score}
 
 
+def compute_scores_for_all_models(
+    model_paths: Dict[str, Sequence[str]]
+) -> Dict[str, Dict[str, float]]:
+    """Iterate over models and collect raw Gabor/HoI metrics.
 
-def compute_scores_for_all_models(model_paths):
-    for model_name, path in model_paths.items():
+    Returns a mapping from model name to a dictionary with ``energy``, ``hoi``,
+    and ``combined`` scores.
+    """
+
+    results: Dict[str, Dict[str, float]] = {}
+    for model_name, paths in model_paths.items():
         print(f"\nProcessing model: {model_name}")
-        print(f"Feature path: {path}")
         try:
-            compute_gabor_scores(path)
+            if isinstance(paths, (tuple, list)) and len(paths) == 2:
+                train_path, eval_path = paths
+            else:
+                train_path = eval_path = paths
+            print(f"Training features: {train_path}")
+            print(f"Evaluation features: {eval_path}")
+            scores = compute_gabor_scores(train_path, eval_path)
+            results[model_name] = scores
         except Exception as e:
             print(f"Error processing model {model_name}: {e}")
+    return results
 
-# Execute for all models
-compute_scores_for_all_models(model_paths)
+
+def compute_scores_for_all_datasets(
+    dataset_model_paths: Dict[str, Dict[str, Sequence[str]]]
+) -> Dict[str, Dict[str, Dict[str, float]]]:
+    """Compute scores for every dataset and its associated models."""
+
+    dataset_results: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for dataset, model_paths in dataset_model_paths.items():
+        print(f"\n=== Dataset: {dataset} ===")
+        dataset_results[dataset] = compute_scores_for_all_models(model_paths)
+    return dataset_results
+
+
+def normalize_and_combine_scores(
+    dataset_results: Dict[str, Dict[str, Dict[str, float]]],
+    weights: Sequence[float] = (0.5, 0.5),
+) -> Dict[str, Dict[str, Dict[str, float]]]:
+    """Z-score each metric across models and form a weighted sum.
+
+    Parameters
+    ----------
+    dataset_results:
+        Raw ``energy`` and ``hoi`` scores for every ``dataset`` → ``model`` pair.
+    weights:
+        Two-element sequence giving the weights for normalized energy and HoI
+        respectively when forming the combined score.
+    """
+
+    all_energy = []
+    all_hoi = []
+    for models in dataset_results.values():
+        for scores in models.values():
+            all_energy.append(scores["energy"])
+            all_hoi.append(scores["hoi"])
+
+    energy_mean, energy_std = np.mean(all_energy), np.std(all_energy) or 1.0
+    hoi_mean, hoi_std = np.mean(all_hoi), np.std(all_hoi) or 1.0
+
+    combined: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for dataset, models in dataset_results.items():
+        combined[dataset] = {}
+        for model, scores in models.items():
+            energy_norm = (scores["energy"] - energy_mean) / energy_std
+            hoi_norm = (scores["hoi"] - hoi_mean) / hoi_std
+            combined_score = weights[0] * energy_norm + weights[1] * hoi_norm
+            combined[dataset][model] = {
+                "energy": scores["energy"],
+                "hoi": scores["hoi"],
+                "combined": combined_score,
+            }
+    return combined
+
+
+def compute_weighted_kendall_tau(
+    scores: Dict[str, float], ground_truth: Dict[str, float]
+) -> float:
+    """Compute weighted Kendall tau between predicted and true scores."""
+
+    common = [m for m in scores if m in ground_truth]
+    pred = [scores[m] for m in common]
+    truth = [ground_truth[m] for m in common]
+    tau, _ = weightedtau(pred, truth)
+    return tau
+
+
+def compute_kendall_tau_across_datasets(
+    all_scores: Dict[str, Dict[str, Dict[str, float]]],
+    ground_truth: Dict[str, Dict[str, float]],
+) -> Dict[str, float]:
+    """Compute weighted Kendall tau for each dataset."""
+
+    taus: Dict[str, float] = {}
+    for dataset, model_scores in all_scores.items():
+        if dataset in ground_truth:
+            preds = {m: s["combined"] for m, s in model_scores.items()}
+            tau = compute_weighted_kendall_tau(preds, ground_truth[dataset])
+            taus[dataset] = tau
+            print(f"Kendall tau_w for {dataset}: {tau}")
+    return taus
+
+
+if __name__ == "__main__":
+    dataset_model_paths = {
+        "dhmc_lung": {
+            "uni": (
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/uni_dhmc_lung.pth",
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/uni_dhmc_lung.pth",
+            ),
+            "conch": (
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/conch_dhmc_lung.pth",
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/conch_dhmc_lung.pth",
+            ),
+            "giga": (
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/giga_dhmc_lung.pth",
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/giga_dhmc_lung.pth",
+            ),
+            "phikon": (
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/phikon_dhmc_lung.pth",
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/phikon_dhmc_lung.pth",
+            ),
+            "virchow": (
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/vir_dhmc_lung.pth",
+                "/home/jovyan/work/PSE_dhmc_lung/dhmc_lung_pth/vir_dhmc_lung.pth",
+            ),
+        },
+        "cam": {
+            "uni": (
+                "/home/jovyan/work/PSE_CAM/cam_pth/uni_cam.pth",
+                "/home/jovyan/work/PSE_CAM/cam_pth/uni_cam.pth",
+            ),
+            "conch": (
+                "/home/jovyan/work/PSE_CAM/cam_pth/conch_cam.pth",
+                "/home/jovyan/work/PSE_CAM/cam_pth/conch_cam.pth",
+            ),
+            "giga": (
+                "/home/jovyan/work/PSE_CAM/cam_pth/giga_cam.pth",
+                "/home/jovyan/work/PSE_CAM/cam_pth/giga_cam.pth",
+            ),
+            "phikon": (
+                "/home/jovyan/work/PSE_CAM/cam_pth/phikon_cam.pth",
+                "/home/jovyan/work/PSE_CAM/cam_pth/phikon_cam.pth",
+            ),
+            "virchow": (
+                "/home/jovyan/work/PSE_CAM/cam_pth/vir_cam.pth",
+                "/home/jovyan/work/PSE_CAM/cam_pth/vir_cam.pth",
+            ),
+        },
+        "bracs": {
+            "uni": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_uni_bracs01/uni_vit_large_patch16_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_uni_bracs01/uni_vit_large_patch16_pretrained_features.pth",
+            ),
+            "conch": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_conch_bracs01/conch_ViT-B-16_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_conch_bracs01/conch_ViT-B-16_pretrained_features.pth",
+            ),
+            "giga": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_giga_bracs01/giga_model_vit_large_patch16_224_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_giga_bracs01/giga_model_vit_large_patch16_224_pretrained_features.pth",
+            ),
+            "phikon": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_phikon_bracs00/phikon_v2_train_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_phikon_bracs00/phikon_v2_train_features.pth",
+            ),
+            "virchow": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_vir_bracs01/Virchow2_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_vir_bracs01/Virchow2_pretrained_features.pth",
+            ),
+        },
+        "bach": {
+            "uni": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_uni_bach01/uni_vit_large_patch16_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_uni_bach01/uni_vit_large_patch16_pretrained_features.pth",
+            ),
+            "conch": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_conch_bach01/conch_ViT-B-16_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_conch_bach01/conch_ViT-B-16_pretrained_features.pth",
+            ),
+            "giga": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_giga_bach01/giga_model_vit_large_patch16_224_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_giga_bach01/giga_model_vit_large_patch16_224_pretrained_features.pth",
+            ),
+            "phikon": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_phikon_bach01/phikon_v2_train_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_phikon_bach01/phikon_v2_train_features.pth",
+            ),
+            "virchow": (
+                "/home/jovyan/work/tran_est/saved_models_and_features_vir_bach01/Virchow2_pretrained_features.pth",
+                "/home/jovyan/work/tran_est/saved_models_and_features_vir_bach01/Virchow2_pretrained_features.pth",
+            ),
+        },
+    }
+
+    raw_scores = compute_scores_for_all_datasets(dataset_model_paths)
+    combined_scores = normalize_and_combine_scores(raw_scores)
+
+    # Example ground-truth accuracies for computing Kendall tau; replace with
+    # real evaluation results when available.
+    # ground_truth = {
+    #     "dhmc_lung": {"uni": 0.0, "conch": 0.0, "giga": 0.0, "phikon": 0.0, "virchow": 0.0},
+    #     "cam": {...},
+    # }
+    # compute_kendall_tau_across_datasets(combined_scores, ground_truth)
+
