@@ -5,6 +5,7 @@ import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms, models
+from tqdm.auto import tqdm
 
 MODEL_ZOO = {
     "uni": (
@@ -96,7 +97,7 @@ def train_one_epoch(
 ) -> float:
     model.train()
     running_loss = 0.0
-    for inputs, targets in loader:
+    for inputs, targets in tqdm(loader, desc="train", leave=False):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -134,9 +135,11 @@ def fine_tune(
     model = create_model(model_name, num_classes, device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    print(f"\nFine-tuning {model_name} on {device} for {epochs} epochs")
     for epoch in range(epochs):
-        train_one_epoch(model, train_loader, criterion, optimizer, device)
-        _ = evaluate(model, val_loader, device)
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        val_acc = evaluate(model, val_loader, device)
+        print(f"Epoch {epoch + 1}/{epochs} - loss: {train_loss:.4f} - val_acc: {val_acc:.4f}")
     accuracy = evaluate(model, test_loader, device)
     return accuracy
 
