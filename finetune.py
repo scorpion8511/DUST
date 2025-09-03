@@ -4,14 +4,14 @@ from typing import Dict, List, Tuple
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
-from torchvision import datasets, transforms, models
+from torchvision import datasets, transforms
 
 MODEL_ZOO = {
-    "uni": models.resnet18,
-    "conch": models.resnet50,
-    "giga": models.densenet121,
-    "phikon": models.efficientnet_b0,
-    "virchow": models.mobilenet_v3_large,
+    "uni": "/home/jovyan/work/tran_est/saved_models_and_features_uni_lc01/uni_vit_large_patch16_pretrained_model.pth",
+    "conch": "/home/jovyan/work/tran_est/saved_models_and_features_conch_lc01/conch_ViT-B-16_pretrained_model.pth",
+    "giga": "/home/jovyan/work/tran_est/saved_models_and_features_giga_lc02/giga_model_vit_large_patch16_224_pretrained_weights.pth",
+    "phikon": "/home/jovyan/work/tran_est/saved_models_and_features_phikon_lc01/phikon_v2_pretrained_model.pth",
+    "virchow": "/home/jovyan/work/tran_est/saved_models_and_features_vir_lc01/Virchow2_pretrained_model.pth",
 }
 
 
@@ -40,11 +40,10 @@ def get_dataloaders(
 
 
 def create_model(name: str, num_classes: int, device: torch.device) -> nn.Module:
-    model_fn = MODEL_ZOO[name]
-    model = model_fn(weights="DEFAULT")
-    model.to(device)
-    model.train()
-    # Replace classifier with new layer for 5 classes
+    """Load a pretrained model from disk and adapt its classifier."""
+    model_path = MODEL_ZOO[name]
+    model = torch.load(model_path, map_location=device)
+    # Replace classifier with new layer for target classes
     if hasattr(model, "fc"):
         in_features = model.fc.in_features
         model.fc = nn.Linear(in_features, num_classes)
@@ -55,6 +54,8 @@ def create_model(name: str, num_classes: int, device: torch.device) -> nn.Module
         else:
             in_features = model.classifier[-1].in_features
             model.classifier[-1] = nn.Linear(in_features, num_classes)
+    model.to(device)
+    model.train()
     return model
 
 
