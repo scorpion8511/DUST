@@ -18,14 +18,19 @@ def compute_histograms(embeddings: Any, labels: Any, num_bins: int = 50, device:
         Input data that can be a tensor or NumPy array. Both are converted to
         tensors residing on ``device``.
     """
-    embeddings = _to_tensor(embeddings, device)
-    labels = _to_tensor(labels, device)
+    embeddings = _to_tensor(embeddings, device).flatten()
+    labels = _to_tensor(labels, device).flatten()
     classes = torch.unique(labels)
     class_histograms = {}
-    bin_edges = None
+    # Use common bin edges so histograms are comparable
+    min_val = embeddings.min()
+    max_val = embeddings.max()
+    bin_edges = torch.linspace(min_val, max_val, steps=num_bins + 1, device=device)
     for cls in classes:
         class_embeddings = embeddings[labels == cls]
-        hist, bin_edges = torch.histogram(class_embeddings.flatten(), bins=num_bins, density=True)
+        hist = torch.histogram(class_embeddings, bins=bin_edges)[0].float()
+        if hist.sum() > 0:
+            hist /= hist.sum()
         class_histograms[int(cls.item())] = hist
     return class_histograms, bin_edges
 

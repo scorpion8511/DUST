@@ -1,9 +1,11 @@
 import math
 import time
-from typing import List
+from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
+
+from HoI import compute_histogram_intersection_metric
 
 
 def to_tensor(data, device):
@@ -79,6 +81,10 @@ class LDA:
         logits = X @ self.coef_.T + self.intercept_
         return torch.softmax(logits, dim=1)
 
+    def transform(self, X: torch.Tensor) -> torch.Tensor:
+        X = to_tensor(X, self.device)
+        return X @ self.scalings_
+
 
 def Energy_Score(logits: torch.Tensor, percent: int, tail: str, device: str = "cpu") -> float:
     logits = to_tensor(logits, device)
@@ -97,21 +103,35 @@ def pad_to_square(tensor: torch.Tensor) -> torch.Tensor:
     return padded
 
 
-def gabor_kernel(frequency: float, kernel_size: int = 31, sigma: float = 4.0, device: str = "cpu") -> torch.Tensor:
+def gabor_kernel(
+    frequency: float,
+    theta: float = 0.0,
+    kernel_size: int = 31,
+    sigma: float = 4.0,
+    device: str = "cpu",
+) -> torch.Tensor:
     xmax = kernel_size // 2
     ymax = kernel_size // 2
     x = torch.linspace(-xmax, xmax, steps=kernel_size, device=device)
     y = torch.linspace(-ymax, ymax, steps=kernel_size, device=device)
     y, x = torch.meshgrid(y, x, indexing="ij")
-    rotx = x
-    g = torch.exp(-0.5 * (rotx**2 + y**2) / sigma**2)
+    rotx = x * math.cos(theta) + y * math.sin(theta)
+    roty = -x * math.sin(theta) + y * math.cos(theta)
+    g = torch.exp(-0.5 * (rotx**2 + roty**2) / sigma**2)
     g *= torch.cos(2 * math.pi * frequency * rotx)
     return g
 
 
-def compute_gabor_features(features: torch.Tensor, frequencies: List[float] | None = None, device: str = "cpu") -> torch.Tensor:
+def compute_gabor_features(
+    features: torch.Tensor,
+    frequencies: Optional[List[float]] = None,
+    orientations: Optional[List[float]] = None,
+    device: str = "cpu",
+) -> torch.Tensor:
     if frequencies is None:
         frequencies = [0.1, 0.2, 0.3]
+    if orientations is None:
+        orientations = [0.0, math.pi / 4, math.pi / 2, 3 * math.pi / 4]
     features = to_tensor(features, device)
     gabor_feats = []
     for feature in features:
@@ -120,24 +140,60 @@ def compute_gabor_features(features: torch.Tensor, frequencies: List[float] | No
         image = padded_feature.view(1, 1, dim, dim)
         image_feats = []
         for freq in frequencies:
-            kernel = gabor_kernel(freq, device=device).unsqueeze(0).unsqueeze(0)
-            resp = F.conv2d(image, kernel, padding=kernel.shape[-1] // 2)
-            image_feats.append(resp.flatten())
+            for theta in orientations:
+                kernel = gabor_kernel(freq, theta=theta, device=device).unsqueeze(0).unsqueeze(0)
+                resp = F.conv2d(image, kernel, padding=kernel.shape[-1] // 2)
+                image_feats.append(resp.flatten())
         gabor_feats.append(torch.cat(image_feats))
     return torch.stack(gabor_feats)
 
 
-def compute_gabor_scores(embeddings: torch.Tensor, labels: torch.Tensor, frequencies: List[float] | None = None, device: str = "cpu") -> dict:
-    embeddings = to_tensor(embeddings, device)
-    labels = to_tensor(labels, device)
-    gabor_features = compute_gabor_features(embeddings, frequencies=frequencies, device=device)
+def _apply_pca(train: torch.Tensor, evald: torch.Tensor, n_components: int) -> tuple[torch.Tensor, torch.Tensor]:
+    train = train - train.mean(0, keepdim=True)
+    evald = evald - train.mean(0, keepdim=True)
+    q = min(n_components, train.shape[1])
+    U, S, V = torch.pca_lowrank(train, q=q)
+    W = V[:, :q]
+    return train @ W, evald @ W
+
+
+def compute_gabor_scores(
+    train_embeddings: torch.Tensor,
+    train_labels: torch.Tensor,
+    eval_embeddings: torch.Tensor,
+    eval_labels: torch.Tensor,
+    frequencies: Optional[List[float]] = None,
+    orientations: Optional[List[float]] = None,
+    pca_dim: Optional[int] = None,
+    device: str = "cpu",
+) -> dict:
+    train_embeddings = to_tensor(train_embeddings, device)
+    eval_embeddings = to_tensor(eval_embeddings, device)
+    train_labels = to_tensor(train_labels, device).long()
+    eval_labels = to_tensor(eval_labels, device).long()
+
+    train_feats = compute_gabor_features(
+        train_embeddings, frequencies=frequencies, orientations=orientations, device=device
+    )
+    eval_feats = compute_gabor_features(
+        eval_embeddings, frequencies=frequencies, orientations=orientations, device=device
+    )
+
+    mean = train_feats.mean(0, keepdim=True)
+    std = train_feats.std(0, keepdim=True).clamp_min(1e-6)
+    train_feats = (train_feats - mean) / std
+    eval_feats = (eval_feats - mean) / std
+
+    if pca_dim is not None and pca_dim < train_feats.shape[1]:
+        train_feats, eval_feats = _apply_pca(train_feats, eval_feats, pca_dim)
+
     lda = LDA(shrinkage=0.1, device=device)
-    lda.fit(gabor_features, labels)
-    probs = lda.predict_proba(gabor_features)
-    lda_score = probs[torch.arange(len(labels), device=device), labels].mean()
-    logits = gabor_features @ lda.coef_.T + lda.intercept_
+    lda.fit(train_feats, train_labels)
+    logits = eval_feats @ lda.coef_.T + lda.intercept_
     energy_score = Energy_Score(logits, percent=100, tail="bot", device=device)
-    return {"lda_score": lda_score.item(), "energy_score": energy_score}
+    proj = lda.transform(eval_feats)[:, 0]
+    hoi_score = compute_histogram_intersection_metric(proj, eval_labels, num_bins=50, device=device)
+    return {"energy": energy_score, "hoi": hoi_score, "combined": energy_score + hoi_score}
 
 
 def benchmark_runtime(n_samples: int = 64, feature_dim: int = 512) -> dict:
@@ -150,7 +206,7 @@ def benchmark_runtime(n_samples: int = 64, feature_dim: int = 512) -> dict:
         labels = torch.randint(0, 2, (n_samples,), device=device)
         torch.cuda.synchronize() if device == "cuda" else None
         start = time.time()
-        compute_gabor_scores(features, labels, device=device)
+        compute_gabor_scores(features, labels, features, labels, device=device)
         torch.cuda.synchronize() if device == "cuda" else None
         timings[device] = time.time() - start
     return timings
