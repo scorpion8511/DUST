@@ -95,31 +95,39 @@ def Energy_Score(logits: torch.Tensor, percent: int, tail: str, device: str = "c
     return energy[chs].mean().item()
 
 
-def pad_to_square(tensor: torch.Tensor) -> torch.Tensor:
-    size = tensor.numel()
+def pad_to_square_batch(tensors: torch.Tensor) -> torch.Tensor:
+    """Pad a batch of 1-D features to form square images."""
+    n, size = tensors.shape
     next_square = int(math.ceil(math.sqrt(size)) ** 2)
-    padded = torch.zeros(next_square, device=tensor.device, dtype=tensor.dtype)
-    padded[:size] = tensor
-    return padded
+    if next_square != size:
+        pad = torch.zeros(n, next_square - size, device=tensors.device, dtype=tensors.dtype)
+        tensors = torch.cat([tensors, pad], dim=1)
+    dim = int(math.sqrt(next_square))
+    return tensors.view(n, 1, dim, dim)
 
 
-def gabor_kernel(
-    frequency: float,
-    theta: float = 0.0,
+def gabor_filter_bank(
+    frequencies: List[float],
+    orientations: List[float],
     kernel_size: int = 31,
     sigma: float = 4.0,
     device: str = "cpu",
 ) -> torch.Tensor:
+    """Create a bank of real/imaginary Gabor kernels stacked for conv2d."""
     xmax = kernel_size // 2
     ymax = kernel_size // 2
     x = torch.linspace(-xmax, xmax, steps=kernel_size, device=device)
     y = torch.linspace(-ymax, ymax, steps=kernel_size, device=device)
     y, x = torch.meshgrid(y, x, indexing="ij")
-    rotx = x * math.cos(theta) + y * math.sin(theta)
-    roty = -x * math.sin(theta) + y * math.cos(theta)
-    g = torch.exp(-0.5 * (rotx**2 + roty**2) / sigma**2)
-    g *= torch.cos(2 * math.pi * frequency * rotx)
-    return g
+    kernels = []
+    for freq in frequencies:
+        for theta in orientations:
+            rotx = x * math.cos(theta) + y * math.sin(theta)
+            roty = -x * math.sin(theta) + y * math.cos(theta)
+            g = torch.exp(-0.5 * (rotx**2 + roty**2) / sigma**2)
+            kernels.append(g * torch.cos(2 * math.pi * freq * rotx))
+            kernels.append(g * torch.sin(2 * math.pi * freq * rotx))
+    return torch.stack(kernels).unsqueeze(1)
 
 
 def compute_gabor_features(
@@ -133,19 +141,14 @@ def compute_gabor_features(
     if orientations is None:
         orientations = [0.0, math.pi / 4, math.pi / 2, 3 * math.pi / 4]
     features = to_tensor(features, device)
-    gabor_feats = []
-    for feature in features:
-        padded_feature = pad_to_square(feature)
-        dim = int(math.sqrt(padded_feature.numel()))
-        image = padded_feature.view(1, 1, dim, dim)
-        image_feats = []
-        for freq in frequencies:
-            for theta in orientations:
-                kernel = gabor_kernel(freq, theta=theta, device=device).unsqueeze(0).unsqueeze(0)
-                resp = F.conv2d(image, kernel, padding=kernel.shape[-1] // 2)
-                image_feats.append(resp.flatten())
-        gabor_feats.append(torch.cat(image_feats))
-    return torch.stack(gabor_feats)
+    images = pad_to_square_batch(features)
+    kernels = gabor_filter_bank(frequencies, orientations, device=device)
+    k = kernels.shape[-1] // 2
+    resp = F.conv2d(images, kernels, padding=k)
+    real = resp[:, 0::2]
+    imag = resp[:, 1::2]
+    magnitude = torch.sqrt(real**2 + imag**2)
+    return magnitude.reshape(magnitude.shape[0], -1)
 
 
 def _apply_pca(train: torch.Tensor, evald: torch.Tensor, n_components: int) -> tuple[torch.Tensor, torch.Tensor]:
