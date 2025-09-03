@@ -38,6 +38,17 @@ def load_model(name: str, device: torch.device) -> torch.nn.Module:
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
     model.load_state_dict(state, strict=False)
+
+    # remove classification head so forward() returns embeddings
+    if hasattr(model, "head"):
+        model.head = torch.nn.Identity()
+    elif hasattr(model, "heads") and hasattr(model.heads, "head"):
+        model.heads.head = torch.nn.Identity()
+    elif hasattr(model, "fc"):
+        model.fc = torch.nn.Identity()
+    elif hasattr(model, "classifier"):
+        model.classifier = torch.nn.Identity()
+
     model.to(device)
     model.eval()
     return model
@@ -58,7 +69,10 @@ def extract_embeddings(model: torch.nn.Module, loader: DataLoader, device: torch
     with torch.no_grad():
         for inputs, targets in tqdm(loader, desc="extract", leave=False):
             inputs = inputs.to(device)
-            outputs = model.forward_features(inputs)
+            if hasattr(model, "forward_features"):
+                outputs = model.forward_features(inputs)
+            else:
+                outputs = model(inputs)
             if isinstance(outputs, tuple):
                 outputs = outputs[0]
             features.append(outputs.cpu())
