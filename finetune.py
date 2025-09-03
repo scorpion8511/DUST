@@ -4,14 +4,29 @@ from typing import Dict, List, Tuple
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, random_split
-from torchvision import datasets, transforms
+from torchvision import datasets, transforms, models
 
 MODEL_ZOO = {
-    "uni": "/home/jovyan/work/tran_est/saved_models_and_features_uni_lc01/uni_vit_large_patch16_pretrained_model.pth",
-    "conch": "/home/jovyan/work/tran_est/saved_models_and_features_conch_lc01/conch_ViT-B-16_pretrained_model.pth",
-    "giga": "/home/jovyan/work/tran_est/saved_models_and_features_giga_lc02/giga_model_vit_large_patch16_224_pretrained_weights.pth",
-    "phikon": "/home/jovyan/work/tran_est/saved_models_and_features_phikon_lc01/phikon_v2_pretrained_model.pth",
-    "virchow": "/home/jovyan/work/tran_est/saved_models_and_features_vir_lc01/Virchow2_pretrained_model.pth",
+    "uni": (
+        models.vit_l_16,
+        "/home/jovyan/work/tran_est/saved_models_and_features_uni_lc01/uni_vit_large_patch16_pretrained_model.pth",
+    ),
+    "conch": (
+        models.vit_b_16,
+        "/home/jovyan/work/tran_est/saved_models_and_features_conch_lc01/conch_ViT-B-16_pretrained_model.pth",
+    ),
+    "giga": (
+        models.vit_l_16,
+        "/home/jovyan/work/tran_est/saved_models_and_features_giga_lc02/giga_model_vit_large_patch16_224_pretrained_weights.pth",
+    ),
+    "phikon": (
+        models.vit_l_16,
+        "/home/jovyan/work/tran_est/saved_models_and_features_phikon_lc01/phikon_v2_pretrained_model.pth",
+    ),
+    "virchow": (
+        models.vit_l_16,
+        "/home/jovyan/work/tran_est/saved_models_and_features_vir_lc01/Virchow2_pretrained_model.pth",
+    ),
 }
 
 
@@ -40,10 +55,13 @@ def get_dataloaders(
 
 
 def create_model(name: str, num_classes: int, device: torch.device) -> nn.Module:
-    """Load a pretrained model from disk and adapt its classifier."""
-    model_path = MODEL_ZOO[name]
-    model = torch.load(model_path, map_location=device)
-    # Replace classifier with new layer for target classes
+    """Instantiate an architecture and load its pretrained weights."""
+    ctor, checkpoint = MODEL_ZOO[name]
+    model = ctor(weights=None)
+    state = torch.load(checkpoint, map_location="cpu")
+    if isinstance(state, dict) and "state_dict" in state:
+        state = state["state_dict"]
+    model.load_state_dict(state, strict=False)
     if hasattr(model, "fc"):
         in_features = model.fc.in_features
         model.fc = nn.Linear(in_features, num_classes)
@@ -54,6 +72,16 @@ def create_model(name: str, num_classes: int, device: torch.device) -> nn.Module
         else:
             in_features = model.classifier[-1].in_features
             model.classifier[-1] = nn.Linear(in_features, num_classes)
+    elif hasattr(model, "heads"):
+        if hasattr(model.heads, "head"):
+            in_features = model.heads.head.in_features
+            model.heads.head = nn.Linear(in_features, num_classes)
+        else:
+            in_features = model.heads.in_features
+            model.heads = nn.Linear(in_features, num_classes)
+    elif hasattr(model, "head"):
+        in_features = model.head.in_features
+        model.head = nn.Linear(in_features, num_classes)
     model.to(device)
     model.train()
     return model
