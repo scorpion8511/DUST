@@ -77,6 +77,46 @@ def normalize_and_combine_scores(
     return combined
 
 
+def derive_optimal_weights(
+    dataset_results: Dict[str, Dict[str, Dict[str, float]]],
+    ground_truth: Dict[str, Dict[str, float]],
+    search_space: Sequence[float] = np.linspace(-1.0, 1.0, 41),
+    default: Sequence[float] = (0.5, 0.5),
+) -> Sequence[float]:
+    """Grid search weights to maximize Kendall tau_w against ground truth."""
+
+    energies, hois, accuracies = [], [], []
+    for dataset, models in dataset_results.items():
+        if dataset not in ground_truth:
+            continue
+        for model, scores in models.items():
+            if model in ground_truth[dataset]:
+                energies.append(scores["energy"])
+                hois.append(scores["hoi"])
+                accuracies.append(ground_truth[dataset][model])
+
+    if not energies:
+        return default
+
+    energy = np.asarray(energies)
+    hoi = np.asarray(hois)
+    acc = np.asarray(accuracies)
+    energy = (energy - energy.mean()) / (energy.std() or 1.0)
+    hoi = (hoi - hoi.mean()) / (hoi.std() or 1.0)
+
+    best_tau = -2.0
+    best_w = default
+    for w_energy in search_space:
+        for w_hoi in search_space:
+            preds = w_energy * energy + w_hoi * hoi
+            tau, _ = weightedtau(preds, acc)
+            if tau > best_tau:
+                best_tau = tau
+                best_w = (float(w_energy), float(w_hoi))
+    print(f"Optimized weights: {best_w} (tau={best_tau})")
+    return best_w
+
+
 def compute_weighted_kendall_tau(
     scores: Dict[str, float], ground_truth: Dict[str, float]
 ) -> float:
@@ -106,6 +146,7 @@ if __name__ == "__main__":
         "LC": {"uni": ("/path/to/train.pth", "/path/to/eval.pth")}
     }
     raw_scores = compute_scores_for_all_datasets(dataset_model_paths)
-    combined_scores = normalize_and_combine_scores(raw_scores)
     ground_truth = {"LC": {"uni": 0.94}}
+    weights = derive_optimal_weights(raw_scores, ground_truth)
+    combined_scores = normalize_and_combine_scores(raw_scores, weights=weights)
     compute_kendall_tau_across_datasets(combined_scores, ground_truth)
