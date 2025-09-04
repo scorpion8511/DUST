@@ -196,7 +196,14 @@ def compute_gabor_scores(
     energy_score = Energy_Score(logits, percent=100, tail="bot", device=device)
     proj = lda.transform(eval_feats)[:, 0]
     hoi_score = compute_histogram_intersection_metric(proj, eval_labels, num_bins=50, device=device)
-    return {"energy": energy_score, "hoi": hoi_score, "combined": energy_score + hoi_score}
+    probs = torch.softmax(logits, dim=1)
+    lda_score = probs[torch.arange(len(eval_labels), device=device), eval_labels].mean().item()
+    return {
+        "energy": energy_score,
+        "hoi": hoi_score,
+        "lda": lda_score,
+        "combined": energy_score + hoi_score,
+    }
 
 
 def benchmark_runtime(n_samples: int = 64, feature_dim: int = 512) -> dict:
