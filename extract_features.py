@@ -3,7 +3,7 @@ import os
 from typing import List, Tuple
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms, models
 from tqdm.auto import tqdm
 
@@ -54,13 +54,33 @@ def load_model(name: str, device: torch.device) -> torch.nn.Module:
     return model
 
 
-def get_dataloader(data_dir: str, batch_size: int) -> Tuple[DataLoader, List[str]]:
+def get_dataloaders(
+    data_dir: str, batch_size: int, split_ratio: float
+) -> Tuple[DataLoader, DataLoader, List[str]]:
+    """Return train and evaluation loaders from a single dataset directory.
+
+    Parameters
+    ----------
+    data_dir: str
+        Root directory containing class subfolders with images.
+    batch_size: int
+        Number of images per mini-batch.
+    split_ratio: float
+        Proportion of samples to use for the training split. The remainder
+        constitutes the evaluation split.
+    """
+
     transform = transforms.Compose(
         [transforms.Resize((224, 224)), transforms.ToTensor()]
     )
     dataset = datasets.ImageFolder(data_dir, transform=transform)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    return loader, dataset.classes
+    train_len = int(len(dataset) * split_ratio)
+    eval_len = len(dataset) - train_len
+    generator = torch.Generator().manual_seed(42)
+    train_set, eval_set = random_split(dataset, [train_len, eval_len], generator)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=False)
+    eval_loader = DataLoader(eval_set, batch_size=batch_size, shuffle=False)
+    return train_loader, eval_loader, dataset.classes
 
 
 def extract_embeddings(model: torch.nn.Module, loader: DataLoader, device: torch.device) -> dict:
@@ -89,46 +109,45 @@ def save_features(output: dict, out_path: str) -> None:
 
 def main(
     models: List[str],
-    train_dir: str,
-    eval_dir: str,
+    data_dir: str,
     out_dir: str,
     device: str,
     batch_size: int,
+    split_ratio: float,
 ) -> None:
     device_obj = torch.device(device)
-    train_loader, _ = get_dataloader(train_dir, batch_size) if train_dir else (None, None)
-    eval_loader, _ = get_dataloader(eval_dir, batch_size) if eval_dir else (None, None)
+    train_loader, eval_loader, _ = get_dataloaders(data_dir, batch_size, split_ratio)
     for name in models:
         print(f"Extracting features for {name} on {device}")
         model = load_model(name, device_obj)
-        if train_loader is not None:
-            train_feats = extract_embeddings(model, train_loader, device_obj)
-            train_out = os.path.join(out_dir, f"{name}_train_features.pth")
-            save_features(train_feats, train_out)
-            print(f"Saved train features to {train_out}")
-        if eval_loader is not None:
-            eval_feats = extract_embeddings(model, eval_loader, device_obj)
-            eval_out = os.path.join(out_dir, f"{name}_eval_features.pth")
-            save_features(eval_feats, eval_out)
-            print(f"Saved eval features to {eval_out}")
+        train_feats = extract_embeddings(model, train_loader, device_obj)
+        train_out = os.path.join(out_dir, f"{name}_train_features.pth")
+        save_features(train_feats, train_out)
+        print(f"Saved train features to {train_out}")
+        eval_feats = extract_embeddings(model, eval_loader, device_obj)
+        eval_out = os.path.join(out_dir, f"{name}_eval_features.pth")
+        save_features(eval_feats, eval_out)
+        print(f"Saved eval features to {eval_out}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract pretrained features")
-    parser.add_argument("train_dir", type=str, help="Path to training dataset root")
-    parser.add_argument("eval_dir", type=str, help="Path to evaluation dataset root")
+    parser.add_argument("data_dir", type=str, help="Path to dataset root")
     parser.add_argument("out_dir", type=str, help="Directory to save features")
     parser.add_argument("--device", type=str, default="cpu", help="Device (cpu or cuda)")
     parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument(
+        "--split", type=float, default=0.8, help="Train split ratio (default 0.8)"
+    )
     parser.add_argument(
         "--models", nargs="*", default=list(MODEL_ZOO.keys()), help="Models to process"
     )
     args = parser.parse_args()
     main(
         args.models,
-        args.train_dir,
-        args.eval_dir,
+        args.data_dir,
         args.out_dir,
         args.device,
         args.batch_size,
+        args.split,
     )
