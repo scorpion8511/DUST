@@ -20,7 +20,6 @@ def compute_gabor_scores_from_paths(
     )
     print(f"Gabor Energy Score (Full): {scores['energy']}")
     print(f"Gabor HoI Score: {scores['hoi']}")
-    print(f"LDA Score: {scores['lda']}")
     return scores
 
 
@@ -53,33 +52,26 @@ def compute_scores_for_all_datasets(
 
 def normalize_and_combine_scores(
     dataset_results: Dict[str, Dict[str, Dict[str, float]]],
-    weights: Sequence[float] = (1 / 3, 1 / 3, 1 / 3),
+    weights: Sequence[float] = (0.5, 0.5),
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     all_energy = []
     all_hoi = []
-    all_lda = []
     for models in dataset_results.values():
         for scores in models.values():
             all_energy.append(scores["energy"])
             all_hoi.append(scores["hoi"])
-            all_lda.append(scores.get("lda", 0.0))
     energy_mean, energy_std = np.mean(all_energy), np.std(all_energy) or 1.0
     hoi_mean, hoi_std = np.mean(all_hoi), np.std(all_hoi) or 1.0
-    lda_mean, lda_std = np.mean(all_lda), np.std(all_lda) or 1.0
     combined: Dict[str, Dict[str, Dict[str, float]]] = {}
     for dataset, models in dataset_results.items():
         combined[dataset] = {}
         for model, scores in models.items():
             energy_norm = (scores["energy"] - energy_mean) / energy_std
             hoi_norm = (scores["hoi"] - hoi_mean) / hoi_std
-            lda_norm = (scores.get("lda", 0.0) - lda_mean) / lda_std
-            combined_score = (
-                weights[0] * energy_norm + weights[1] * hoi_norm + weights[2] * lda_norm
-            )
+            combined_score = weights[0] * energy_norm + weights[1] * hoi_norm
             combined[dataset][model] = {
                 "energy": scores["energy"],
                 "hoi": scores["hoi"],
-                "lda": scores.get("lda", 0.0),
                 "combined": combined_score,
             }
     return combined
@@ -89,11 +81,11 @@ def derive_optimal_weights(
     dataset_results: Dict[str, Dict[str, Dict[str, float]]],
     ground_truth: Dict[str, Dict[str, float]],
     search_space: Sequence[float] = np.linspace(-1.0, 1.0, 41),
-    default: Sequence[float] = (1 / 3, 1 / 3, 1 / 3),
+    default: Sequence[float] = (0.5, 0.5),
 ) -> Sequence[float]:
     """Grid search weights to maximize Kendall tau_w against ground truth."""
 
-    energies, hois, ldas, accuracies = [], [], [], []
+    energies, hois, accuracies = [], [], []
     for dataset, models in dataset_results.items():
         if dataset not in ground_truth:
             continue
@@ -101,7 +93,6 @@ def derive_optimal_weights(
             if model in ground_truth[dataset]:
                 energies.append(scores["energy"])
                 hois.append(scores["hoi"])
-                ldas.append(scores.get("lda", 0.0))
                 accuracies.append(ground_truth[dataset][model])
 
     if not energies:
@@ -109,22 +100,19 @@ def derive_optimal_weights(
 
     energy = np.asarray(energies)
     hoi = np.asarray(hois)
-    lda = np.asarray(ldas)
     acc = np.asarray(accuracies)
     energy = (energy - energy.mean()) / (energy.std() or 1.0)
     hoi = (hoi - hoi.mean()) / (hoi.std() or 1.0)
-    lda = (lda - lda.mean()) / (lda.std() or 1.0)
 
     best_tau = -2.0
     best_w = default
     for w_energy in search_space:
         for w_hoi in search_space:
-            for w_lda in search_space:
-                preds = w_energy * energy + w_hoi * hoi + w_lda * lda
-                tau, _ = weightedtau(preds, acc)
-                if tau > best_tau:
-                    best_tau = tau
-                    best_w = (float(w_energy), float(w_hoi), float(w_lda))
+            preds = w_energy * energy + w_hoi * hoi
+            tau, _ = weightedtau(preds, acc)
+            if tau > best_tau:
+                best_tau = tau
+                best_w = (float(w_energy), float(w_hoi))
     print(f"Optimized weights: {best_w} (tau={best_tau})")
     return best_w
 

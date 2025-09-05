@@ -167,7 +167,7 @@ def compute_gabor_scores(
     eval_labels: torch.Tensor,
     frequencies: Optional[List[float]] = None,
     orientations: Optional[List[float]] = None,
-    pca_dim: Optional[int] = None,
+    pca_dim: Optional[int] = 128,
     device: str = "cpu",
 ) -> dict:
     train_embeddings = to_tensor(train_embeddings, device)
@@ -196,12 +196,10 @@ def compute_gabor_scores(
     energy_score = Energy_Score(logits, percent=100, tail="bot", device=device)
     proj = lda.transform(eval_feats)[:, 0]
     hoi_score = compute_histogram_intersection_metric(proj, eval_labels, num_bins=50, device=device)
-    probs = torch.softmax(logits, dim=1)
-    lda_score = probs[torch.arange(len(eval_labels), device=device), eval_labels].mean().item()
+    hoi_score = float(max(0.0, min(1.0, hoi_score)))
     return {
         "energy": energy_score,
         "hoi": hoi_score,
-        "lda": lda_score,
         "combined": energy_score + hoi_score,
     }
 
