@@ -1,9 +1,10 @@
+import argparse
 import numpy as np
 import torch
 from typing import Dict, Sequence
 from scipy.stats import weightedtau
 
-from gabor_eng import compute_gabor_scores
+from gabor_eng import compute_gabor_scores, benchmark_runtime
 
 
 def compute_gabor_scores_from_paths(
@@ -149,11 +150,23 @@ def compute_kendall_tau_across_datasets(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Score models using Gabor features")
+    parser.add_argument("--device", default="cpu", help="Device to run scoring on")
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Benchmark runtime on CPU vs GPU and print results",
+    )
+    args = parser.parse_args()
+
     dataset_model_paths = {
         "LC": {"uni": ("/path/to/train.pth", "/path/to/eval.pth")}
     }
-    raw_scores = compute_scores_for_all_datasets(dataset_model_paths)
+    raw_scores = compute_scores_for_all_datasets(dataset_model_paths, device=args.device)
     ground_truth = {"LC": {"uni": 0.94}}
     weights = derive_optimal_weights(raw_scores, ground_truth)
     combined_scores = normalize_and_combine_scores(raw_scores, weights=weights)
     compute_kendall_tau_across_datasets(combined_scores, ground_truth)
+
+    if args.benchmark:
+        print("Benchmark:", benchmark_runtime())

@@ -205,16 +205,40 @@ def compute_gabor_scores(
 
 
 def benchmark_runtime(n_samples: int = 64, feature_dim: int = 512) -> dict:
+    """Benchmark scoring runtime on CPU vs. GPU.
+
+    Parameters
+    ----------
+    n_samples: int
+        Number of synthetic samples used for the benchmark.
+    feature_dim: int
+        Dimensionality of each synthetic embedding.
+
+    Returns
+    -------
+    dict
+        Mapping of device name to elapsed time in seconds.
+    """
+
     timings = {}
     for device in ["cpu", "cuda"]:
         if device == "cuda" and not torch.cuda.is_available():
             print("CUDA not available; skipping GPU benchmark.")
             continue
+
         features = torch.randn(n_samples, feature_dim, device=device)
         labels = torch.randint(0, 2, (n_samples,), device=device)
-        torch.cuda.synchronize() if device == "cuda" else None
+
+        if device == "cuda":
+            torch.cuda.synchronize()
         start = time.time()
         compute_gabor_scores(features, labels, features, labels, device=device)
-        torch.cuda.synchronize() if device == "cuda" else None
+        if device == "cuda":
+            torch.cuda.synchronize()
+
         timings[device] = time.time() - start
+
+    if {"cpu", "cuda"}.issubset(timings.keys()):
+        speedup = timings["cpu"] / timings["cuda"]
+        timings["speedup"] = speedup
     return timings
