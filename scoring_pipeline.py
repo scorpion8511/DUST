@@ -54,20 +54,26 @@ def normalize_and_combine_scores(
     dataset_results: Dict[str, Dict[str, Dict[str, float]]],
     weights: Sequence[float] = (0.5, 0.5),
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
-    all_energy = []
-    all_hoi = []
-    for models in dataset_results.values():
-        for scores in models.values():
-            all_energy.append(scores["energy"])
-            all_hoi.append(scores["hoi"])
-    energy_mean, energy_std = np.mean(all_energy), np.std(all_energy) or 1.0
-    hoi_mean, hoi_std = np.mean(all_hoi), np.std(all_hoi) or 1.0
+    """Normalize metrics within each dataset and form a weighted sum.
+
+    Energy scores are inverted so that lower raw energy yields a higher
+    normalized value.  HoI scores already follow the convention that larger
+    is better.  Per-dataset normalization prevents one dataset's scale from
+    dominating the combined metric.
+    """
+
     combined: Dict[str, Dict[str, Dict[str, float]]] = {}
     for dataset, models in dataset_results.items():
+        energies = np.array([s["energy"] for s in models.values()])
+        hois = np.array([s["hoi"] for s in models.values()])
+        e_mean, e_std = energies.mean(), energies.std() or 1.0
+        h_mean, h_std = hois.mean(), hois.std() or 1.0
+
         combined[dataset] = {}
         for model, scores in models.items():
-            energy_norm = (scores["energy"] - energy_mean) / energy_std
-            hoi_norm = (scores["hoi"] - hoi_mean) / hoi_std
+            # Invert energy so that higher normalized value implies better model.
+            energy_norm = -((scores["energy"] - e_mean) / e_std)
+            hoi_norm = (scores["hoi"] - h_mean) / h_std
             combined_score = weights[0] * energy_norm + weights[1] * hoi_norm
             combined[dataset][model] = {
                 "energy": scores["energy"],
@@ -101,7 +107,8 @@ def derive_optimal_weights(
     energy = np.asarray(energies)
     hoi = np.asarray(hois)
     acc = np.asarray(accuracies)
-    energy = (energy - energy.mean()) / (energy.std() or 1.0)
+    # Invert energy so that higher values correspond to better models
+    energy = -((energy - energy.mean()) / (energy.std() or 1.0))
     hoi = (hoi - hoi.mean()) / (hoi.std() or 1.0)
 
     best_tau = -2.0
