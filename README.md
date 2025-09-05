@@ -24,3 +24,18 @@ linear classifier on the embeddings:
 ```bash
 python finetune.py --feature_dir out_dir --device cuda:0
 ```
+
+## Gabor-based scoring
+
+`scoring_pipeline.py` evaluates stored features with Gabor filters and
+computes energy and histogram-intersection (HoI) metrics.  A `--device`
+flag selects the compute device and an optional `--benchmark` run reports
+CPU vs. GPU timing:
+
+```bash
+python scoring_pipeline.py --device cuda:0 --benchmark
+```
+
+All intermediate computations occur on the chosen device; results are
+normalized per dataset and combined using learned weights before
+reporting per-dataset Kendall τ correlations with ground-truth accuracy.
