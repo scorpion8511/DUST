@@ -59,22 +59,22 @@ This will create files such as
 `<output_root>/SOB/histogram/mag40.npy` that can be consumed by
 `scoring_pipeline.py`.
 
-If you have embeddings produced with `extract_features.py`, run the extractor
-separately on each magnification folder and rename the resulting files to
-`mag40.pth`, `mag100.pth`, etc.  Arrange them under
-`<features_root>/<dataset>/<model>/` to match the layout above, then invoke the
-scoring pipeline pointing to `features_root`.
+To generate model-based embeddings instead of colour histograms, use
+`extract_features.py` which traverses the same directory layout and produces a
+`magXX.pth` file for each magnification automatically.
 
 ## Extracting Features from Pretrained Models
 
-Use `extract_features.py` to generate embeddings from the five provided
-pretrained models (`uni`, `conch`, `giga`, `phikon`, `virchow`).  The script
-splits the dataset into train/eval subsets, runs each model, and stores the
-resulting feature dictionaries as `.pth` files:
+`extract_features.py` generates embeddings from the five provided pretrained
+models (`uni`, `conch`, `giga`, `phikon`, `virchow`).  It scans every region and
+magnification under `data_root`, averages the model embeddings for all images in
+each magnification folder, and stores per-magnification feature files under
+`<out_dir>/<dataset>/<model>/magXX.pth`:
 
 ```
-python extract_features.py <data_root> <out_dir> [--models uni conch giga phikon virchow]
+python extract_features.py <data_root> <out_dir> [--dataset SOB] [--models uni conch giga phikon virchow]
 ```
 
-Each output file contains an `embeddings` tensor and corresponding `labels`
-tensor that can be reused for downstream experiments.
+Each `magXX.pth` file contains an `embeddings` tensor of shape
+`(n_regions, dim)` and a `labels` tensor with the corresponding cancer-type
+indices.
