@@ -7,6 +7,8 @@ from typing import Dict, List
 import numpy as np
 from PIL import Image
 
+# Magnifications represented in the dataset.  Corresponding directories may be
+# named e.g. ``40X`` or ``40x``; the code matches case-insensitively.
 MAGNIFICATIONS = ["40", "100", "200", "400"]
 
 
@@ -26,8 +28,8 @@ def prepare_embeddings(data_root: Path, output_root: Path, dataset: str = "SOB",
         data_root/
             cancer_type/
                 region_id/
-                    40/ 100/ 200/ 400/   # magnification folders
-                        *.png            # images at this magnification
+                    40X/ 100X/ 200X/ 400X/   # magnification folders
+                        *.png                 # images at this magnification
 
     Features are computed as average colour histograms for all images in a
     region/magnification.  The resulting arrays are saved to
@@ -41,10 +43,24 @@ def prepare_embeddings(data_root: Path, output_root: Path, dataset: str = "SOB",
         for region_dir in sorted(p for p in cancer_dir.iterdir() if p.is_dir()):
             region_dirs.append(region_dir)
             for mag in MAGNIFICATIONS:
-                img_dir = region_dir / mag
+                # locate the magnification directory, allowing optional and
+                # case-insensitive ``x`` suffix (e.g. ``40X`` or ``40x``)
+                candidates = [
+                    region_dir / mag,
+                    region_dir / f"{mag}x",
+                    region_dir / f"{mag}X",
+                ]
+                img_dir = next((p for p in candidates if p.is_dir()), None)
+                if img_dir is None:
+                    raise FileNotFoundError(
+                        f"no images for {region_dir} at {mag}X"
+                    )
+
                 imgs = sorted(img_dir.glob("*.png"))
                 if not imgs:
-                    raise FileNotFoundError(f"no images for {region_dir} at {mag}x")
+                    raise FileNotFoundError(
+                        f"no images for {region_dir} at {mag}X"
+                    )
                 feats = [_image_histogram(img) for img in imgs]
                 features[mag].append(np.mean(feats, axis=0))
 

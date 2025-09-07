@@ -44,8 +44,8 @@ dataset should be organised as:
 data_root/
     cancer_type/
         region_id/
-            40/ 100/ 200/ 400/
-                *.png
+            40X/ 100X/ 200X/ 400X/
+                *.png   # "X" suffix may be upper- or lower-case
 ```
 
 Run the preparation script to compute simple colour-histogram embeddings and
