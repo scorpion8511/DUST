@@ -58,3 +58,17 @@ python prepare_dataset.py <data_root> <output_root> [--dataset SOB] [--feature-n
 This will create files such as
 `<output_root>/SOB/histogram/mag40.npy` that can be consumed by
 `scoring_pipeline.py`.
+
+## Extracting Features from Pretrained Models
+
+Use `extract_features.py` to generate embeddings from the five provided
+pretrained models (`uni`, `conch`, `giga`, `phikon`, `virchow`).  The script
+splits the dataset into train/eval subsets, runs each model, and stores the
+resulting feature dictionaries as `.pth` files:
+
+```
+python extract_features.py <data_root> <out_dir> [--models uni conch giga phikon virchow]
+```
+
+Each output file contains an `embeddings` tensor and corresponding `labels`
+tensor that can be reused for downstream experiments.
