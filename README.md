@@ -18,16 +18,16 @@ score = msci_v(embeddings)  # embeddings shape: (regions, magnifications, dim)
 ## Scoring Pipeline
 
 `scoring_pipeline.py` loads multi-magnification features organised as
-`dataset/model/*.npy`, computes MSCI-V scores, z-score normalises them **across
-all datasets**, and performs a global grid search for metric weights using all
-models and datasets together.
+`dataset/model/mag*.npy` (or `.pth`), computes MSCI-V scores, z-score
+normalises them **across all datasets**, and performs a global grid search for
+metric weights using all models and datasets together.
 
 ```
 python scoring_pipeline.py <features_root> [--targets targets.csv]
 ```
 
-* `features_root`: Root directory containing `dataset/model` folders with `.npy`
-  feature files for each magnification.
+* `features_root`: Root directory containing `dataset/model` folders with
+  `magXX.npy` or `magXX.pth` feature files for each magnification.
 * `--targets`: Optional CSV with columns `dataset,model,score` used to perform a
   global grid search over metric weights.
 
@@ -58,6 +58,12 @@ python prepare_dataset.py <data_root> <output_root> [--dataset SOB] [--feature-n
 This will create files such as
 `<output_root>/SOB/histogram/mag40.npy` that can be consumed by
 `scoring_pipeline.py`.
+
+If you have embeddings produced with `extract_features.py`, run the extractor
+separately on each magnification folder and rename the resulting files to
+`mag40.pth`, `mag100.pth`, etc.  Arrange them under
+`<features_root>/<dataset>/<model>/` to match the layout above, then invoke the
+scoring pipeline pointing to `features_root`.
 
 ## Extracting Features from Pretrained Models
 

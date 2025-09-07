@@ -17,12 +17,26 @@ import numpy as np
 from msci import msci_v
 
 
-def load_multi_magnification_features(root: Path) -> Dict[str, Dict[str, np.ndarray]]:
-    """Load features organised as ``root/dataset/model/*.npy``.
+def _load_array(path: Path) -> np.ndarray:
+    """Load either a ``.npy`` or ``.pth`` feature file into a NumPy array."""
+    if path.suffix == ".npy":
+        return np.load(path)
+    if path.suffix == ".pth":
+        import torch
 
-    Each ``.npy`` file inside a model directory represents embeddings from a
-    particular magnification with shape ``(regions, dim)``.  The files are
-    stacked along a new dimension to form ``(regions, mags, dim)``.
+        obj = torch.load(path, map_location="cpu")
+        if isinstance(obj, dict) and "embeddings" in obj:
+            obj = obj["embeddings"]
+        return np.asarray(obj)
+    raise ValueError(f"unsupported feature format: {path}")
+
+
+def load_multi_magnification_features(root: Path) -> Dict[str, Dict[str, np.ndarray]]:
+    """Load features organised as ``root/dataset/model/mag*.{npy,pth}``.
+
+    Each file inside a model directory represents embeddings from a particular
+    magnification with shape ``(regions, dim)``.  The files are stacked along a
+    new dimension to form ``(regions, mags, dim)``.
     """
     data: Dict[str, Dict[str, np.ndarray]] = {}
     for dataset_dir in root.iterdir():
@@ -32,7 +46,9 @@ def load_multi_magnification_features(root: Path) -> Dict[str, Dict[str, np.ndar
         for model_dir in dataset_dir.iterdir():
             if not model_dir.is_dir():
                 continue
-            mags = [np.load(f) for f in sorted(model_dir.glob("*.npy"))]
+            files = sorted(f for f in model_dir.glob("mag*.npy"))
+            files += sorted(f for f in model_dir.glob("mag*.pth"))
+            mags = [_load_array(f) for f in files]
             if not mags:
                 continue
             stacked = np.stack(mags, axis=1)  # (regions, mags, dim)
