@@ -53,35 +53,24 @@ def compute_scores_for_all_datasets(
 
 def normalize_and_combine_scores(
     dataset_results: Dict[str, Dict[str, Dict[str, float]]],
-    weights: Dict[str, Sequence[float]] | None = None,
+    weights: Sequence[float] = (0.5, 0.5),
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     """Normalize metrics within each dataset and form a weighted sum.
 
-    Parameters
-    ----------
-    dataset_results:
-        Raw metric dictionary of ``dataset`` -> ``model`` -> scores.
-    weights:
-        Optional mapping of ``dataset`` -> ``(w_energy, w_hoi)``. Datasets not
-        present fall back to equal weighting.
-
-    Notes
-    -----
     Energy scores are inverted so that lower raw energy yields a higher
     normalized value. HoI scores already follow the convention that larger is
     better. Per-dataset normalization prevents one dataset's scale from
-    dominating the combined metric.
+    dominating the combined metric. ``weights`` gives the global weighting for
+    normalized energy and HoI respectively.
     """
 
-    weights = weights or {}
+    w_energy, w_hoi = weights
     combined: Dict[str, Dict[str, Dict[str, float]]] = {}
     for dataset, models in dataset_results.items():
         energies = np.array([s["energy"] for s in models.values()])
         hois = np.array([s["hoi"] for s in models.values()])
         e_mean, e_std = energies.mean(), energies.std() or 1.0
         h_mean, h_std = hois.mean(), hois.std() or 1.0
-
-        w_energy, w_hoi = weights.get(dataset, (0.5, 0.5))
 
         combined[dataset] = {}
         for model, scores in models.items():
@@ -96,19 +85,21 @@ def normalize_and_combine_scores(
     return combined
 
 
-def derive_optimal_weights_per_dataset(
+def derive_optimal_weights(
     dataset_results: Dict[str, Dict[str, Dict[str, float]]],
     ground_truth: Dict[str, Dict[str, float]],
     search_space: Sequence[float] = np.linspace(-1.0, 1.0, 41),
     default: Sequence[float] = (0.5, 0.5),
-) -> Dict[str, Sequence[float]]:
-    """Grid-search metric weights separately for each dataset."""
+) -> Sequence[float]:
+    """Grid-search a single pair of metric weights across all datasets."""
 
-    weights: Dict[str, Sequence[float]] = {}
+    energy_all, hoi_all, acc_all = [], [], []
     for dataset, models in dataset_results.items():
         if dataset not in ground_truth:
             continue
-        energies, hois, accs = [], [], []
+        energies = []
+        hois = []
+        accs = []
         for model, scores in models.items():
             if model in ground_truth[dataset]:
                 energies.append(scores["energy"])
@@ -116,25 +107,32 @@ def derive_optimal_weights_per_dataset(
                 accs.append(ground_truth[dataset][model])
         if not energies:
             continue
+        energies = np.asarray(energies)
+        hois = np.asarray(hois)
+        accs = np.asarray(accs)
+        energies = -((energies - energies.mean()) / (energies.std() or 1.0))
+        hois = (hois - hois.mean()) / (hois.std() or 1.0)
+        energy_all.extend(energies)
+        hoi_all.extend(hois)
+        acc_all.extend(accs)
 
-        energy = np.asarray(energies)
-        hoi = np.asarray(hois)
-        acc = np.asarray(accs)
-        energy = -((energy - energy.mean()) / (energy.std() or 1.0))
-        hoi = (hoi - hoi.mean()) / (hoi.std() or 1.0)
+    if not energy_all:
+        return default
+    energy_all = np.asarray(energy_all)
+    hoi_all = np.asarray(hoi_all)
+    acc_all = np.asarray(acc_all)
 
-        best_tau = -2.0
-        best_w = default
-        for w_energy in search_space:
-            for w_hoi in search_space:
-                preds = w_energy * energy + w_hoi * hoi
-                tau, _ = weightedtau(preds, acc)
-                if tau > best_tau:
-                    best_tau = tau
-                    best_w = (float(w_energy), float(w_hoi))
-        print(f"Optimized weights for {dataset}: {best_w} (tau={best_tau})")
-        weights[dataset] = best_w
-    return weights
+    best_tau = -2.0
+    best_w = default
+    for w_energy in search_space:
+        for w_hoi in search_space:
+            preds = w_energy * energy_all + w_hoi * hoi_all
+            tau, _ = weightedtau(preds, acc_all)
+            if tau > best_tau:
+                best_tau = tau
+                best_w = (float(w_energy), float(w_hoi))
+    print(f"Optimized global weights: {best_w} (tau={best_tau})")
+    return best_w
 
 
 def compute_weighted_kendall_tau(
@@ -176,7 +174,7 @@ if __name__ == "__main__":
     }
     raw_scores = compute_scores_for_all_datasets(dataset_model_paths, device=args.device)
     ground_truth = {"LC": {"uni": 0.94}}
-    weights = derive_optimal_weights_per_dataset(raw_scores, ground_truth)
+    weights = derive_optimal_weights(raw_scores, ground_truth)
     combined_scores = normalize_and_combine_scores(raw_scores, weights=weights)
     compute_kendall_tau_across_datasets(combined_scores, ground_truth)
 

@@ -154,7 +154,7 @@ def compute_gabor_features(
 def _apply_pca(train: torch.Tensor, evald: torch.Tensor, n_components: int) -> tuple[torch.Tensor, torch.Tensor]:
     train = train - train.mean(0, keepdim=True)
     evald = evald - train.mean(0, keepdim=True)
-    q = min(n_components, train.shape[1])
+    q = min(n_components, train.shape[0], train.shape[1])
     U, S, V = torch.pca_lowrank(train, q=q)
     W = V[:, :q]
     return train @ W, evald @ W
@@ -187,8 +187,10 @@ def compute_gabor_scores(
     train_feats = (train_feats - mean) / std
     eval_feats = (eval_feats - mean) / std
 
-    if pca_dim is not None and pca_dim < train_feats.shape[1]:
-        train_feats, eval_feats = _apply_pca(train_feats, eval_feats, pca_dim)
+    if pca_dim is not None:
+        pca_dim = min(pca_dim, train_feats.shape[0], train_feats.shape[1])
+        if pca_dim > 0:
+            train_feats, eval_feats = _apply_pca(train_feats, eval_feats, pca_dim)
 
     lda = LDA(shrinkage=0.1, device=device)
     lda.fit(train_feats, train_labels)
