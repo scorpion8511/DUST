@@ -20,7 +20,7 @@ def compute_gabor_scores_from_paths(
         device=device,
     )
     print(f"Gabor Energy Score (Full): {scores['energy']}")
-    print(f"Gabor HoI Score: {scores['hoi']}")
+    print(f"Gabor Fisher Score: {scores['fisher']}")
     return scores
 
 
@@ -58,28 +58,28 @@ def normalize_and_combine_scores(
     """Normalize metrics within each dataset and form a weighted sum.
 
     Energy scores are inverted so that lower raw energy yields a higher
-    normalized value. HoI scores already follow the convention that larger is
-    better. Per-dataset normalization prevents one dataset's scale from
+    normalized value. Fisher scores already follow the convention that larger
+    is better. Per-dataset normalization prevents one dataset's scale from
     dominating the combined metric. ``weights`` gives the global weighting for
-    normalized energy and HoI respectively.
+    normalized energy and Fisher scores respectively.
     """
 
-    w_energy, w_hoi = weights
+    w_energy, w_fisher = weights
     combined: Dict[str, Dict[str, Dict[str, float]]] = {}
     for dataset, models in dataset_results.items():
         energies = np.array([s["energy"] for s in models.values()])
-        hois = np.array([s["hoi"] for s in models.values()])
+        fishers = np.array([s["fisher"] for s in models.values()])
         e_mean, e_std = energies.mean(), energies.std() or 1.0
-        h_mean, h_std = hois.mean(), hois.std() or 1.0
+        f_mean, f_std = fishers.mean(), fishers.std() or 1.0
 
         combined[dataset] = {}
         for model, scores in models.items():
             energy_norm = -((scores["energy"] - e_mean) / e_std)
-            hoi_norm = (scores["hoi"] - h_mean) / h_std
-            combined_score = w_energy * energy_norm + w_hoi * hoi_norm
+            fisher_norm = (scores["fisher"] - f_mean) / f_std
+            combined_score = w_energy * energy_norm + w_fisher * fisher_norm
             combined[dataset][model] = {
                 "energy": scores["energy"],
-                "hoi": scores["hoi"],
+                "fisher": scores["fisher"],
                 "combined": combined_score,
             }
     return combined
@@ -93,44 +93,44 @@ def derive_optimal_weights(
 ) -> Sequence[float]:
     """Grid-search a single pair of metric weights across all datasets."""
 
-    energy_all, hoi_all, acc_all = [], [], []
+    energy_all, fisher_all, acc_all = [], [], []
     for dataset, models in dataset_results.items():
         if dataset not in ground_truth:
             continue
         energies = []
-        hois = []
+        fishers = []
         accs = []
         for model, scores in models.items():
             if model in ground_truth[dataset]:
                 energies.append(scores["energy"])
-                hois.append(scores["hoi"])
+                fishers.append(scores["fisher"])
                 accs.append(ground_truth[dataset][model])
         if not energies:
             continue
         energies = np.asarray(energies)
-        hois = np.asarray(hois)
+        fishers = np.asarray(fishers)
         accs = np.asarray(accs)
         energies = -((energies - energies.mean()) / (energies.std() or 1.0))
-        hois = (hois - hois.mean()) / (hois.std() or 1.0)
+        fishers = (fishers - fishers.mean()) / (fishers.std() or 1.0)
         energy_all.extend(energies)
-        hoi_all.extend(hois)
+        fisher_all.extend(fishers)
         acc_all.extend(accs)
 
     if not energy_all:
         return default
     energy_all = np.asarray(energy_all)
-    hoi_all = np.asarray(hoi_all)
+    fisher_all = np.asarray(fisher_all)
     acc_all = np.asarray(acc_all)
 
     best_tau = -2.0
     best_w = default
     for w_energy in search_space:
-        for w_hoi in search_space:
-            preds = w_energy * energy_all + w_hoi * hoi_all
+        for w_fisher in search_space:
+            preds = w_energy * energy_all + w_fisher * fisher_all
             tau, _ = weightedtau(preds, acc_all)
             if tau > best_tau:
                 best_tau = tau
-                best_w = (float(w_energy), float(w_hoi))
+                best_w = (float(w_energy), float(w_fisher))
     print(f"Optimized global weights: {best_w} (tau={best_tau})")
     return best_w
 

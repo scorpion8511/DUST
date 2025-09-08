@@ -5,8 +5,6 @@ from typing import List, Optional
 import torch
 import torch.nn.functional as F
 
-from HoI import compute_histogram_intersection_metric
-
 
 def to_tensor(data, device):
     """Convert input data to a torch.Tensor on the given device."""
@@ -196,14 +194,27 @@ def compute_gabor_scores(
     lda.fit(train_feats, train_labels)
     logits = eval_feats @ lda.coef_.T + lda.intercept_
     energy_score = Energy_Score(logits, percent=100, tail="bot", device=device)
-    proj = lda.transform(eval_feats)[:, 0]
-    hoi_score = compute_histogram_intersection_metric(proj, eval_labels, num_bins=50, device=device)
-    hoi_score = float(max(0.0, min(1.0, hoi_score)))
+    fisher = fisher_score(eval_feats, eval_labels)
     return {
         "energy": energy_score,
-        "hoi": hoi_score,
-        "combined": energy_score + hoi_score,
+        "fisher": fisher,
+        "combined": energy_score + fisher,
     }
+
+
+def fisher_score(features: torch.Tensor, labels: torch.Tensor) -> float:
+    """Compute Fisher discriminant ratio for class separation."""
+    labels = labels.long()
+    classes, counts = torch.unique(labels, return_counts=True)
+    overall = features.mean(0)
+    sb = torch.zeros(1, device=features.device)
+    sw = torch.zeros(1, device=features.device)
+    for cls, cnt in zip(classes, counts):
+        feats = features[labels == cls]
+        mean = feats.mean(0)
+        sb += cnt * torch.sum((mean - overall) ** 2)
+        sw += torch.sum((feats - mean) ** 2)
+    return (sb / (sw + 1e-6)).item()
 
 
 def benchmark_runtime(n_samples: int = 64, feature_dim: int = 512) -> dict:
