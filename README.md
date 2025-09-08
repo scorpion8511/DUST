@@ -26,8 +26,10 @@ metric weights using all models and datasets together.
 python scoring_pipeline.py <features_root> [--targets targets.csv]
 ```
 
-* `features_root`: Root directory containing `dataset/model` folders with
-  `magXX.npy` or `magXX.pth` feature files for each magnification.
+* `features_root`: Directory containing `dataset/model` folders with
+  `magXX.npy` or `magXX.pth` feature files for each magnification.  When only a
+  single dataset is available you may point `features_root` directly at the
+  dataset folder (i.e. `features_root/model/magXX.*`).
 * `--targets`: Optional CSV with columns `dataset,model,score` used to perform a
   global grid search over metric weights.
 

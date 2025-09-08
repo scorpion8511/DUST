@@ -34,25 +34,45 @@ def _load_array(path: Path) -> np.ndarray:
 def load_multi_magnification_features(root: Path) -> Dict[str, Dict[str, np.ndarray]]:
     """Load features organised as ``root/dataset/model/mag*.{npy,pth}``.
 
+    The function also supports passing a path to a *single* dataset where the
+    directory structure is ``root/model/magXX.*``.
+
     Each file inside a model directory represents embeddings from a particular
     magnification with shape ``(regions, dim)``.  The files are stacked along a
     new dimension to form ``(regions, mags, dim)``.
     """
     data: Dict[str, Dict[str, np.ndarray]] = {}
-    for dataset_dir in root.iterdir():
-        if not dataset_dir.is_dir():
-            continue
+    children = [d for d in root.iterdir() if d.is_dir()]
+    if not children:
+        return data
+
+    # Detect whether ``root`` already points to a dataset folder containing
+    # model subdirectories directly.
+    first_child = children[0]
+    has_mag_files = list(first_child.glob("mag*.npy")) + list(first_child.glob("mag*.pth"))
+    if has_mag_files:
+        dataset_name = root.name
+        data[dataset_name] = {}
+        model_dirs = children
+        for model_dir in model_dirs:
+            files = sorted(list(model_dir.glob("mag*.npy")) + list(model_dir.glob("mag*.pth")))
+            mags = [_load_array(f) for f in files]
+            if mags:
+                stacked = np.stack(mags, axis=1)
+                data[dataset_name][model_dir.name] = stacked
+        return data
+
+    # Otherwise ``root`` contains dataset subdirectories.
+    for dataset_dir in children:
         data[dataset_dir.name] = {}
         for model_dir in dataset_dir.iterdir():
             if not model_dir.is_dir():
                 continue
-            files = sorted(f for f in model_dir.glob("mag*.npy"))
-            files += sorted(f for f in model_dir.glob("mag*.pth"))
+            files = sorted(list(model_dir.glob("mag*.npy")) + list(model_dir.glob("mag*.pth")))
             mags = [_load_array(f) for f in files]
-            if not mags:
-                continue
-            stacked = np.stack(mags, axis=1)  # (regions, mags, dim)
-            data[dataset_dir.name][model_dir.name] = stacked
+            if mags:
+                stacked = np.stack(mags, axis=1)  # (regions, mags, dim)
+                data[dataset_dir.name][model_dir.name] = stacked
     return data
 
 
@@ -67,6 +87,8 @@ def compute_msci_scores(features: Dict[str, Dict[str, np.ndarray]]) -> Dict[str,
 
 def zscore_across_datasets(scores: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
     all_scores = [score for ds in scores.values() for score in ds.values()]
+    if not all_scores:
+        return {}
     mean = float(np.mean(all_scores))
     std = float(np.std(all_scores)) or 1.0
     normalised: Dict[str, Dict[str, float]] = {}
@@ -133,7 +155,13 @@ def main() -> None:
 
     features = load_multi_magnification_features(args.features_root)
     raw_scores = compute_msci_scores(features)
+    if not any(raw_scores.values()):
+        print(f"No feature files found under {args.features_root}")
+        return
     norm_scores = zscore_across_datasets(raw_scores)
+    if not norm_scores:
+        print("No MSCI-V scores could be computed.")
+        return
 
     print("Raw MSCI-V scores:")
     for ds, models in raw_scores.items():
