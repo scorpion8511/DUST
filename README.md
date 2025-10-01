@@ -54,7 +54,10 @@ matching the screenshot you shared (e.g. columns `label`, `is_test`,
 column names without modifying the CSV itself.
 
 The script expects a TorchScript checkpoint with `encode_image` and
-`encode_text` entry points. For the locally downloaded encoders you can run:
+`encode_text` entry points. Checkpoints exported via `torch.package`
+are also supported – the loader will fall back to `PackageImporter` when
+the TorchScript archive omits `constants.pkl`. For the locally downloaded
+encoders you can run:
 
 ```bash
 python multimodal_feature_extraction.py manifest.csv plip_features.pth \

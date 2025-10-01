@@ -347,7 +347,7 @@ class TorchScriptEncoder:
     device: torch.device
 
     def __post_init__(self) -> None:
-        module = torch.jit.load(self.path, map_location=self.device)
+        module = self._load_module()
         module.eval()
         self.module = module
 
@@ -355,6 +355,30 @@ class TorchScriptEncoder:
             raise AttributeError(
                 "TorchScript module must expose 'encode_image' and 'encode_text' methods."
             )
+
+    def _load_module(self):
+        try:
+            return torch.jit.load(self.path, map_location=self.device)
+        except RuntimeError as exc:
+            # Some checkpoints are packaged without the default TorchScript constant
+            # archive (e.g. exported via ``torch.package``). Attempt to recover by
+            # loading through ``PackageImporter`` before surfacing a clearer error.
+            if "constants.pkl" in str(exc):
+                try:
+                    from torch.package import PackageImporter
+
+                    importer = PackageImporter(self.path)
+                    module = importer.load_pickle("model", "model.pkl")
+                    return module.to(self.device) if hasattr(module, "to") else module
+                except Exception as inner_exc:  # pragma: no cover - importer failure
+                    raise RuntimeError(
+                        "Failed to load weights via TorchScript; the archive is missing"
+                        " 'constants.pkl'. Attempted to interpret the file as a"
+                        " torch.package export but that also failed. Please ensure"
+                        " the supplied checkpoint is a TorchScript module exposing"
+                        " 'encode_image'/'encode_text'."
+                    ) from inner_exc
+            raise
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
         images = images.to(self.device)
