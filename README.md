@@ -93,6 +93,10 @@ stores magnification coverage inside the `region_id` (e.g. values like
 identifier (`patch_0`). The original CSV identifiers are preserved inside the
 exported metadata under `csv_region_mapping` for traceability.
 
+Magnification entries may either be plain numbers (``5``) or tokens such as
+``5x``/``10×``; the loader automatically extracts the numeric component before
+grouping crops by magnification.
+
 ## Multimodal transferability metrics
 
 `multimodal_scoring.py` implements the Magnification-Scale Consistency

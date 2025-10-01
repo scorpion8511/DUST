@@ -51,6 +51,7 @@ import argparse
 import csv
 import json
 import os
+import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence
@@ -142,6 +143,30 @@ def _strip_magnification_suffix(identifier: str) -> str:
     return "_".join(base_parts)
 
 
+_MAGNIFICATION_PATTERN = re.compile(r"([-+]?\d*\.?\d+)")
+
+
+def _parse_magnification(raw_value) -> int:
+    """Coerce magnification tokens such as ``5``/``10x``/``20 X`` to integers."""
+
+    if raw_value is None:
+        raise ValueError("Magnification value is missing.")
+
+    if isinstance(raw_value, (int, float)):
+        return int(round(float(raw_value)))
+
+    text = str(raw_value).strip().lower()
+    if not text:
+        raise ValueError("Magnification value is empty.")
+
+    text = text.replace("×", "x")
+    match = _MAGNIFICATION_PATTERN.search(text)
+    if match is None:
+        raise ValueError(f"Could not parse magnification value: {raw_value!r}")
+
+    return int(round(float(match.group(1))))
+
+
 class ImageTextCSVDataset(Dataset):
     """Dataset that materialises samples from a CSV specification."""
 
@@ -199,7 +224,7 @@ class ImageTextCSVDataset(Dataset):
                     else raw_region_id
                 )
                 try:
-                    magnification = int(round(float(row[magnification_column])))
+                    magnification = _parse_magnification(row[magnification_column])
                 except (TypeError, ValueError) as exc:
                     raise ValueError(
                         f"Invalid magnification value {row[magnification_column]!r} for region {region_id}."
