@@ -39,3 +39,22 @@ python scoring_pipeline.py --device cuda:0 --benchmark
 All intermediate computations occur on the chosen device; results are
 normalized per dataset and combined using learned weights before
 reporting per-dataset Kendall τ correlations with ground-truth accuracy.
+
+## Multimodal transferability metrics
+
+`multimodal_scoring.py` implements the Magnification-Scale Consistency
+Index (MSCI) and a cross-modal mutual information lower bound (CMI-LB)
+for paired image/text embeddings stored in a single `.pth` file. The
+file must contain a `text_embeddings` tensor and an
+`image_embeddings` dictionary mapping magnification levels (e.g. 5/10/20)
+to the corresponding image feature tensors. To evaluate the metrics, run:
+
+```bash
+python multimodal_scoring.py /path/to/multimodal_features.pth --device cuda:0 \
+    --temperature 0.07 --json multimodal_scores.json
+```
+
+By default all magnifications present in the feature file are used.
+Setting `--magnifications` allows evaluation on a subset, while the
+`--json` flag stores the resulting metrics in JSON format for further
+analysis.
