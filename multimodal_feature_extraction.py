@@ -111,12 +111,35 @@ class Sample:
     """Single image/text example drawn from the CSV manifest."""
 
     region_id: str
+    csv_region_id: str
     magnification: int
     image_path: str
     text: Optional[str]
     text_tokens: Optional[List[int]]
     location: Optional[PatchLocation]
     raw_row: Mapping[str, str]
+
+
+def _strip_magnification_suffix(identifier: str) -> str:
+    """Collapse identifiers like ``patch_0_5x_10x`` to ``patch_0``."""
+
+    parts = identifier.split("_")
+    if len(parts) <= 1:
+        return identifier
+
+    base_parts = []
+    for part in parts:
+        token = part.strip().lower()
+        if token.endswith("x"):
+            magnitude = token[:-1]
+            if magnitude.replace(".", "", 1).isdigit():
+                continue
+        base_parts.append(part)
+
+    # Avoid stripping everything in pathological cases.
+    if not base_parts:
+        return identifier
+    return "_".join(base_parts)
 
 
 class ImageTextCSVDataset(Dataset):
@@ -138,6 +161,7 @@ class ImageTextCSVDataset(Dataset):
         location_size_column: Optional[str],
         default_patch_size: Optional[float],
         strict_files: bool,
+        strip_region_suffix: bool,
         filter_column: Optional[str],
         filter_values: Optional[Sequence[str]],
     ) -> None:
@@ -168,7 +192,12 @@ class ImageTextCSVDataset(Dataset):
                         continue
                     if filter_values is None and value in {"", "0", "False", "false", "NONE", "None"}:
                         continue
-                region_id = str(row[region_column])
+                raw_region_id = str(row[region_column])
+                region_id = (
+                    _strip_magnification_suffix(raw_region_id)
+                    if strip_region_suffix
+                    else raw_region_id
+                )
                 try:
                     magnification = int(round(float(row[magnification_column])))
                 except (TypeError, ValueError) as exc:
@@ -217,6 +246,7 @@ class ImageTextCSVDataset(Dataset):
 
                 sample = Sample(
                     region_id=region_id,
+                    csv_region_id=raw_region_id,
                     magnification=magnification,
                     image_path=image_path,
                     text=text_value,
@@ -257,6 +287,7 @@ class ImageTextCSVDataset(Dataset):
                 "image_path": sample.image_path,
                 "patch": patch_metadata,
                 "csv_row": dict(sample.raw_row),
+                "csv_region_id": sample.csv_region_id,
             },
         }
 
@@ -368,7 +399,9 @@ class RegionAccumulator:
     text_embedding: Optional[torch.Tensor] = None
     text_value: Optional[str] = None
     images: Dict[int, torch.Tensor] = field(default_factory=dict)
-    metadata: Dict[str, object] = field(default_factory=lambda: {"patches": {}, "samples": []})
+    metadata: Dict[str, object] = field(
+        default_factory=lambda: {"patches": {}, "samples": [], "csv_region_ids": set()}
+    )
 
 
 def extract_features(
@@ -415,6 +448,8 @@ def extract_features(
                 patch = batch["metadata"][idx].get("patch")
                 if patch is not None:
                     accumulator.metadata.setdefault("patches", {})[magnification] = patch
+                original_id = batch["metadata"][idx].get("csv_region_id", region_id)
+                accumulator.metadata.setdefault("csv_region_ids", set()).add(original_id)
 
     if magnifications is None:
         ordered_magnifications = sorted(observed_magnifications)
@@ -427,6 +462,7 @@ def extract_features(
             )
 
     region_ids: List[str] = []
+    csv_region_mapping: Dict[str, List[str]] = {}
     if not regions:
         raise ValueError("No regions were processed by the feature extractor.")
 
@@ -442,6 +478,10 @@ def extract_features(
         text_embeddings.append(accumulator.text_embedding)
         raw_texts.append(accumulator.text_value)
         region_ids.append(region_id)
+        csv_ids = accumulator.metadata.get("csv_region_ids", set())
+        if not csv_ids:
+            csv_ids = {region_id}
+        csv_region_mapping[region_id] = sorted(csv_ids)
         for mag in ordered_magnifications:
             embedding = accumulator.images.get(mag)
             if embedding is None:
@@ -456,7 +496,8 @@ def extract_features(
         # Only executed when break is triggered – remove partially appended data.
         text_embeddings.pop()
         raw_texts.pop()
-        region_ids.pop()
+        removed_id = region_ids.pop()
+        csv_region_mapping.pop(removed_id, None)
         for mag in ordered_magnifications:
             if patches[mag]:
                 patches[mag].pop()
@@ -483,6 +524,7 @@ def extract_features(
         "region_ids": region_ids,
         "texts": raw_texts,
         "patches": patches,
+        "csv_region_mapping": csv_region_mapping,
     }
 
     return {
@@ -584,6 +626,11 @@ def build_argparser() -> argparse.ArgumentParser:
         action="store_true",
         help="Drop regions that are missing one or more requested magnifications instead of failing.",
     )
+    parser.add_argument(
+        "--strip-region-suffix",
+        action="store_true",
+        help="Normalize region identifiers by removing trailing magnification tokens like '_5x_10x'.",
+    )
     return parser
 
 
@@ -603,6 +650,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
         location_size_column=args.location_size,
         default_patch_size=args.default_patch_size,
         strict_files=args.strict_files,
+        strip_region_suffix=args.strip_region_suffix,
         filter_column=args.filter_column,
         filter_values=args.filter_values,
     )

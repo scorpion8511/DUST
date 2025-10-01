@@ -86,7 +86,12 @@ If the TorchScript module exposes a custom tokeniser (`tokenize`), raw text can
 be passed directly. Otherwise, provide a `--text-token-column` in the CSV that
 contains pre-tokenised text as JSON or space-delimited integer ids. Use
 `--drop-missing` if you prefer to silently skip regions lacking one or more
-requested magnifications instead of terminating with an error.
+requested magnifications instead of terminating with an error. When your CSV
+stores magnification coverage inside the `region_id` (e.g. values like
+`patch_0_5x_10x_20x` for a single patch observed at multiple scales), enable
+`--strip-region-suffix` so the loader collapses those entries to a shared
+identifier (`patch_0`). The original CSV identifiers are preserved inside the
+exported metadata under `csv_region_mapping` for traceability.
 
 ## Multimodal transferability metrics
 
