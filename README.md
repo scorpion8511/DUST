@@ -47,7 +47,11 @@ feature structure consumed by the multimodal scoring utilities. The manifest
 should provide `region_id`, `magnification`, `image_path`, `text`, and optional
 patch-location columns (`patch_x`, `patch_y`, `patch_size`, `patch_width`,
 `patch_height`). Relative image paths can be rooted via `--image-root` and the
-loader verifies file existence when `--strict-files` is supplied.
+loader verifies file existence when `--strict-files` is supplied. For manifests
+matching the screenshot you shared (e.g. columns `label`, `is_test`,
+`slide_id`, `region_id`, `magnification`, `patch_path`, `prompt_net`,
+`patch_x`, `patch_y`, `patch_size`), you can point the script at the relevant
+column names without modifying the CSV itself.
 
 The script expects a TorchScript checkpoint with `encode_image` and
 `encode_text` entry points. For the locally downloaded encoders you can run:
@@ -56,6 +60,9 @@ The script expects a TorchScript checkpoint with `encode_image` and
 python multimodal_feature_extraction.py manifest.csv plip_features.pth \
     --weights /home/jovyan/work/tran_est/MUST/models/plip_model.pth \
     --image-root /home/jovyan/work/tran_est/MUST/patches \
+    --image-column patch_path \
+    --text-column prompt_net \
+    --filter-column is_test --filter-values 0 \
     --device cuda:0 \
     --metadata-json plip_features_metadata.json
 ```
@@ -65,15 +72,21 @@ feature sets:
 
 ```bash
 python multimodal_feature_extraction.py manifest.csv titan_features.pth \
-    --weights /home/jovyan/work/tran_est/MUST/models/titan_model.pth
+    --weights /home/jovyan/work/tran_est/MUST/models/titan_model.pth \
+    --image-column patch_path --text-column prompt_net \
+    --filter-column is_test --filter-values 0
 
 python multimodal_feature_extraction.py manifest.csv conch_features.pth \
-    --weights /home/jovyan/work/tran_est/MUST/models/conch_model.pth
+    --weights /home/jovyan/work/tran_est/MUST/models/conch_model.pth \
+    --image-column patch_path --text-column prompt_net \
+    --filter-column is_test --filter-values 0
 ```
 
 If the TorchScript module exposes a custom tokeniser (`tokenize`), raw text can
 be passed directly. Otherwise, provide a `--text-token-column` in the CSV that
-contains pre-tokenised text as JSON or space-delimited integer ids.
+contains pre-tokenised text as JSON or space-delimited integer ids. Use
+`--drop-missing` if you prefer to silently skip regions lacking one or more
+requested magnifications instead of terminating with an error.
 
 ## Multimodal transferability metrics
 

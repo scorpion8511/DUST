@@ -138,6 +138,8 @@ class ImageTextCSVDataset(Dataset):
         location_size_column: Optional[str],
         default_patch_size: Optional[float],
         strict_files: bool,
+        filter_column: Optional[str],
+        filter_values: Optional[Sequence[str]],
     ) -> None:
         self.samples: List[Sample] = []
         self._text_column = text_column
@@ -152,7 +154,20 @@ class ImageTextCSVDataset(Dataset):
                 raise ValueError(
                     f"CSV file is missing required columns: {', '.join(sorted(missing))}."
                 )
+            if filter_column and filter_column not in reader.fieldnames:
+                raise ValueError(
+                    f"Filter column '{filter_column}' is not present in the CSV header."
+                )
             for row in reader:
+                if filter_column:
+                    value = row.get(filter_column)
+                    if value is None:
+                        continue
+                    value = value.strip()
+                    if filter_values is not None and value not in filter_values:
+                        continue
+                    if filter_values is None and value in {"", "0", "False", "false", "NONE", "None"}:
+                        continue
                 region_id = str(row[region_column])
                 try:
                     magnification = int(round(float(row[magnification_column])))
@@ -361,6 +376,7 @@ def extract_features(
     encoder: TorchScriptEncoder,
     magnifications: Optional[Sequence[int]],
     normalize: bool,
+    drop_missing: bool,
 ) -> Dict[str, object]:
     regions: "OrderedDict[str, RegionAccumulator]" = OrderedDict()
     observed_magnifications: set[int] = set()
@@ -410,27 +426,45 @@ def extract_features(
                 f"Requested magnifications {sorted(missing)} were not found in the dataset."
             )
 
-    region_ids = list(regions.keys())
-    if not region_ids:
+    region_ids: List[str] = []
+    if not regions:
         raise ValueError("No regions were processed by the feature extractor.")
 
     text_embeddings = []
     raw_texts = []
     patches = {mag: [] for mag in ordered_magnifications}
 
-    for region_id in region_ids:
-        accumulator = regions[region_id]
+    for region_id, accumulator in regions.items():
         if accumulator.text_embedding is None:
+            if drop_missing:
+                continue
             raise ValueError(f"Missing text embedding for region {region_id}.")
         text_embeddings.append(accumulator.text_embedding)
         raw_texts.append(accumulator.text_value)
+        region_ids.append(region_id)
         for mag in ordered_magnifications:
             embedding = accumulator.images.get(mag)
             if embedding is None:
+                if drop_missing:
+                    break
                 raise ValueError(
                     f"Region {region_id} does not contain an image for magnification {mag}."
                 )
             patches[mag].append(accumulator.metadata.get("patches", {}).get(mag))
+        else:
+            continue
+        # Only executed when break is triggered – remove partially appended data.
+        text_embeddings.pop()
+        raw_texts.pop()
+        region_ids.pop()
+        for mag in ordered_magnifications:
+            if patches[mag]:
+                patches[mag].pop()
+
+    if not region_ids:
+        raise ValueError(
+            "All regions were filtered out – check the magnification coverage or disable --drop-missing."
+        )
 
     text_tensor = torch.stack(text_embeddings, dim=0)
 
@@ -510,6 +544,19 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Fallback size (in pixels) when only X/Y are provided for a patch.",
     )
     parser.add_argument(
+        "--filter-column",
+        type=str,
+        default=None,
+        help="Optional column used to filter rows (e.g. 'is_test').",
+    )
+    parser.add_argument(
+        "--filter-values",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Values retained for --filter-column. Omit to drop falsy entries (''/0/False).",
+    )
+    parser.add_argument(
         "--magnifications",
         type=int,
         nargs="*",
@@ -532,6 +579,11 @@ def build_argparser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable L2 normalisation of the extracted embeddings.",
     )
+    parser.add_argument(
+        "--drop-missing",
+        action="store_true",
+        help="Drop regions that are missing one or more requested magnifications instead of failing.",
+    )
     return parser
 
 
@@ -551,6 +603,8 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
         location_size_column=args.location_size,
         default_patch_size=args.default_patch_size,
         strict_files=args.strict_files,
+        filter_column=args.filter_column,
+        filter_values=args.filter_values,
     )
 
     transform = _default_image_transform(args.image_size, args.mean, args.std)
@@ -572,6 +626,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
         encoder=encoder,
         magnifications=args.magnifications,
         normalize=not args.skip_normalization,
+        drop_missing=args.drop_missing,
     )
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
