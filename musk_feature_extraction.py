@@ -22,13 +22,18 @@ import os
 from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from multimodal_feature_extraction import ImageTextCSVDataset
+
+DEFAULT_PROCESSOR_FALLBACKS: Tuple[str, ...] = (
+    "openai/clip-vit-large-patch14",
+    "openai/clip-vit-base-patch32",
+)
 
 
 @dataclass
@@ -156,34 +161,72 @@ class MUSKEncoder:
             processor_kwargs["token"] = token
             model_kwargs["token"] = token
 
+        processor: Optional[object] = None
+        processor_source = processor_target
         processor_error: Optional[Exception] = None
+        clip_errors: List[Tuple[str, Exception]] = []
         try:
-            self.processor = AutoProcessor.from_pretrained(
+            processor = AutoProcessor.from_pretrained(
                 processor_target,
                 **processor_kwargs,
             )
         except (OSError, ValueError) as exc:
             processor_error = exc
+
+        if processor is None:
             try:
                 from transformers import CLIPProcessor  # type: ignore
+            except ImportError as clip_import_exc:  # pragma: no cover - handled at runtime
+                if processor_error is not None:
+                    raise processor_error from clip_import_exc
+                raise clip_import_exc
 
-                clip_kwargs = {}
-                if processor_revision is not None:
-                    clip_kwargs["revision"] = processor_revision
-                elif revision is not None and processor_name_or_path is None:
-                    clip_kwargs["revision"] = revision
-                if token is not None:
-                    clip_kwargs["token"] = token
-                self.processor = CLIPProcessor.from_pretrained(
+            clip_kwargs = {}
+            if processor_revision is not None:
+                clip_kwargs["revision"] = processor_revision
+            elif revision is not None and processor_name_or_path is None:
+                clip_kwargs["revision"] = revision
+            if token is not None:
+                clip_kwargs["token"] = token
+            try:
+                processor = CLIPProcessor.from_pretrained(
                     processor_target,
                     **clip_kwargs,
                 )
-            except Exception as clip_exc:  # pragma: no cover - error propagation path
-                raise type(clip_exc)(
-                    "Failed to load a processor for the MUSK checkpoint. "
-                    "Tried AutoProcessor (error: %s) and CLIPProcessor (error: %s)." %
-                    (processor_error, clip_exc)
-                ) from clip_exc
+            except Exception as clip_exc:
+                clip_errors.append((processor_target, clip_exc))
+                fallback_candidates: Tuple[str, ...] = ()
+                if processor_name_or_path is None:
+                    fallback_candidates = tuple(
+                        candidate
+                        for candidate in DEFAULT_PROCESSOR_FALLBACKS
+                        if candidate != processor_target
+                    )
+                last_exc: Optional[Exception] = clip_exc
+                for candidate in fallback_candidates:
+                    try:
+                        processor = CLIPProcessor.from_pretrained(candidate)
+                        processor_source = candidate
+                        last_exc = None
+                        break
+                    except Exception as candidate_exc:  # pragma: no cover - fallback failures
+                        clip_errors.append((candidate, candidate_exc))
+                        last_exc = candidate_exc
+                if processor is None:
+                    error_fragments: List[str] = []
+                    if processor_error is not None:
+                        error_fragments.append(
+                            f"AutoProcessor({processor_target}): {processor_error}"
+                        )
+                    for name, err in clip_errors:
+                        error_fragments.append(f"CLIPProcessor({name}): {err}")
+                    message = "Failed to load a processor for the MUSK checkpoint. "
+                    message += " | ".join(error_fragments)
+                    raise RuntimeError(message) from last_exc
+
+        self.processor = processor
+        self.processor_source = processor_source
+
         self.model = AutoModel.from_pretrained(
             model_name_or_path,
             **model_kwargs,
@@ -579,13 +622,20 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
 
     metadata = features.get("metadata")
     if isinstance(metadata, dict):
+        requested_processor = args.processor_name_or_path or args.model_name_or_path
         metadata.update(
             {
                 "musk_model": args.model_name_or_path,
                 "musk_revision": args.revision,
                 "precision": args.precision,
-                "musk_processor": args.processor_name_or_path or args.model_name_or_path,
-                "musk_processor_revision": args.processor_revision,
+                "musk_processor": getattr(encoder, "processor_source", requested_processor),
+                "musk_processor_requested": requested_processor,
+                "musk_processor_revision": (
+                    args.processor_revision
+                    if getattr(encoder, "processor_source", requested_processor)
+                    == requested_processor
+                    else None
+                ),
             }
         )
 
@@ -601,3 +651,4 @@ def main() -> None:  # pragma: no cover - CLI entry point
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
     main()
+

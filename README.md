@@ -156,7 +156,11 @@ accessed by providing `--hf-token` (or exporting an `HF_TOKEN`/`HUGGINGFACE_TOKE
 environment variable). Some MUSK releases omit processor configuration files on
 the Hub; in those cases, supply `--processor-name-or-path` (and optionally
 `--processor-revision`) with a compatible CLIP processor, such as
-`openai/clip-vit-large-patch14`, or point to a local preprocessor directory. The
+`openai/clip-vit-large-patch14`, or point to a local preprocessor directory. When
+no processor identifier is provided and the checkpoint lacks configs, the script
+automatically falls back to common CLIP preprocessors (starting with
+`openai/clip-vit-large-patch14`) so authenticated downloads using a token like
+`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` succeed without additional flags. The
 exported `.pth` archive aligns with
 `multimodal_scoring.py`, enabling direct MSCI/CMI-LB computation alongside the
 TorchScript and PLIP features.
