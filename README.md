@@ -119,10 +119,12 @@ python plip_feature_extraction.py manifest.csv plip_native_features.pth \
 
 By default the loader instantiates `PLIP('vinid/plip')` and L2-normalises both
 modalities (mirroring the public usage example). Supply `--model` to point at a
-different checkpoint or `--no-normalize` to export the raw embeddings. The
-resulting metadata dictionary captures the resolved region ids, original CSV
-identifiers, per-magnification patch geometry, and the PLIP model identifier for
-auditability.
+different checkpoint or `--no-normalize` to export the raw embeddings. When a
+region appears with multiple captions (e.g. separate descriptions for each
+magnification) the script averages their embeddings and stores every unique
+caption in the exported metadata. The resulting metadata dictionary captures the
+resolved region ids, original CSV identifiers, per-magnification patch geometry,
+and the PLIP model identifier for auditability.
 
 ## Multimodal transferability metrics
 

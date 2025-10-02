@@ -44,9 +44,9 @@ class RegionAccumulator:
     """Stores embeddings and metadata for a spatial region."""
 
     region_id: str
-    text_embedding: Optional[torch.Tensor] = None
-    text_value: Optional[str] = None
+    text_sum: Optional[torch.Tensor] = None
     text_count: int = 0
+    text_values: List[str] = field(default_factory=list)
     images: Dict[int, torch.Tensor] = field(default_factory=dict)
     metadata: Dict[str, object] = field(
         default_factory=lambda: {"patches": {}, "samples": [], "csv_region_ids": set()}
@@ -113,26 +113,12 @@ def extract_plip_embeddings(
             embedding_text = text_embeddings[idx].cpu()
 
             current_text = texts[idx]
-            if accumulator.text_embedding is None:
-                accumulator.text_embedding = embedding_text
-                accumulator.text_value = current_text
-                accumulator.text_count = 1
+            if accumulator.text_sum is None:
+                accumulator.text_sum = embedding_text.clone()
             else:
-                if accumulator.text_value != current_text:
-                    raise ValueError(
-                        f"Mismatched captions detected for region {region_id}:"
-                        f" '{accumulator.text_value}' vs '{current_text}'."
-                    )
-
-                accumulator.text_count += 1
-                step = 1.0 / float(accumulator.text_count)
-                accumulator.text_embedding = accumulator.text_embedding + (
-                    embedding_text - accumulator.text_embedding
-                ) * step
-                if normalize:
-                    accumulator.text_embedding = F.normalize(
-                        accumulator.text_embedding.unsqueeze(0), dim=-1
-                    ).squeeze(0)
+                accumulator.text_sum = accumulator.text_sum + embedding_text
+            accumulator.text_count += 1
+            accumulator.text_values.append(current_text)
 
             accumulator.images[magnification] = embedding_image
             accumulator.metadata.setdefault("samples", []).append(batch["metadata"][idx])
@@ -159,14 +145,26 @@ def extract_plip_embeddings(
     patches = {mag: [] for mag in ordered_magnifications}
 
     for region_id, accumulator in regions.items():
-        if accumulator.text_embedding is None:
+        if accumulator.text_sum is None or accumulator.text_count == 0:
             if drop_missing:
                 continue
             raise ValueError(f"Missing text embedding for region {region_id}.")
 
+        text_mean = accumulator.text_sum / float(accumulator.text_count)
+        if normalize:
+            text_mean = F.normalize(text_mean.unsqueeze(0), dim=-1).squeeze(0)
+
         region_ids.append(region_id)
-        text_embeddings.append(accumulator.text_embedding)
-        raw_texts.append(accumulator.text_value)
+        text_embeddings.append(text_mean)
+
+        if accumulator.text_values:
+            unique_texts = list(OrderedDict.fromkeys(accumulator.text_values))
+            if len(unique_texts) == 1:
+                raw_texts.append(unique_texts[0])
+            else:
+                raw_texts.append(unique_texts)
+        else:
+            raw_texts.append(None)
 
         csv_ids = accumulator.metadata.get("csv_region_ids", set())
         if not csv_ids:
