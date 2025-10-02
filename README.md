@@ -100,6 +100,30 @@ Magnification entries may either be plain numbers (``5``) or tokens such as
 ``5x``/``10×``; the loader automatically extracts the numeric component before
 grouping crops by magnification.
 
+### PLIP convenience extractor
+
+When you would rather call the native `plip` library instead of TorchScript
+encoders, use `plip_feature_extraction.py`. The script consumes the same CSV
+schema (including patch metadata, filtering, and suffix stripping) and produces
+a `.pth` archive shaped exactly like the TorchScript pipeline, making it
+compatible with `multimodal_scoring.py`.
+
+```bash
+python plip_feature_extraction.py manifest.csv plip_native_features.pth \
+    --image-root /home/jovyan/work/tran_est/multires_VL/output \
+    --image-column patch_path --text-column generated_text \
+    --magnification-column patch_scale --region-column patch_id \
+    --strip-region-suffix --filter-column is_test --filter-values 0 \
+    --metadata-json plip_native_metadata.json
+```
+
+By default the loader instantiates `PLIP('vinid/plip')` and L2-normalises both
+modalities (mirroring the public usage example). Supply `--model` to point at a
+different checkpoint or `--no-normalize` to export the raw embeddings. The
+resulting metadata dictionary captures the resolved region ids, original CSV
+identifiers, per-magnification patch geometry, and the PLIP model identifier for
+auditability.
+
 ## Multimodal transferability metrics
 
 `multimodal_scoring.py` implements the Magnification-Scale Consistency
