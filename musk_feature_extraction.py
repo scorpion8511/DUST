@@ -107,6 +107,8 @@ class MUSKEncoder:
         precision: str = "fp32",
         trust_remote_code: bool = True,
         token: Optional[str] = None,
+        processor_name_or_path: Optional[str] = None,
+        processor_revision: Optional[str] = None,
     ) -> None:
         try:
             from transformers import AutoModel, AutoProcessor
@@ -136,6 +138,8 @@ class MUSKEncoder:
 
         token = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
 
+        processor_target = processor_name_or_path or model_name_or_path
+
         processor_kwargs = {
             "trust_remote_code": trust_remote_code,
         }
@@ -143,8 +147,11 @@ class MUSKEncoder:
             "trust_remote_code": trust_remote_code,
         }
         if revision is not None:
-            processor_kwargs["revision"] = revision
+            if processor_name_or_path is None and processor_revision is None:
+                processor_kwargs["revision"] = revision
             model_kwargs["revision"] = revision
+        if processor_revision is not None:
+            processor_kwargs["revision"] = processor_revision
         if token is not None:
             processor_kwargs["token"] = token
             model_kwargs["token"] = token
@@ -152,7 +159,7 @@ class MUSKEncoder:
         processor_error: Optional[Exception] = None
         try:
             self.processor = AutoProcessor.from_pretrained(
-                model_name_or_path,
+                processor_target,
                 **processor_kwargs,
             )
         except (OSError, ValueError) as exc:
@@ -161,12 +168,14 @@ class MUSKEncoder:
                 from transformers import CLIPProcessor  # type: ignore
 
                 clip_kwargs = {}
-                if revision is not None:
+                if processor_revision is not None:
+                    clip_kwargs["revision"] = processor_revision
+                elif revision is not None and processor_name_or_path is None:
                     clip_kwargs["revision"] = revision
                 if token is not None:
                     clip_kwargs["token"] = token
                 self.processor = CLIPProcessor.from_pretrained(
-                    model_name_or_path,
+                    processor_target,
                     **clip_kwargs,
                 )
             except Exception as clip_exc:  # pragma: no cover - error propagation path
@@ -415,6 +424,21 @@ def build_argparser() -> argparse.ArgumentParser:
         default="lilab-stanford/musk",
         help="Identifier or local path for the MUSK checkpoint (default: lilab-stanford/musk).",
     )
+    parser.add_argument(
+        "--processor-name-or-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional processor identifier when the MUSK repository lacks processor configs. "
+            "Defaults to --model-name-or-path when unset."
+        ),
+    )
+    parser.add_argument(
+        "--processor-revision",
+        type=str,
+        default=None,
+        help="Optional revision/tag to use when downloading the processor checkpoint.",
+    )
     parser.add_argument("--revision", type=str, default=None, help="Optional model revision/tag to load.")
     parser.add_argument(
         "--hf-token",
@@ -541,6 +565,8 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         precision=args.precision,
         trust_remote_code=args.trust_remote_code,
         token=args.hf_token,
+        processor_name_or_path=args.processor_name_or_path,
+        processor_revision=args.processor_revision,
     )
 
     features = extract_musk_embeddings(
@@ -558,6 +584,8 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
                 "musk_model": args.model_name_or_path,
                 "musk_revision": args.revision,
                 "precision": args.precision,
+                "musk_processor": args.processor_name_or_path or args.model_name_or_path,
+                "musk_processor_revision": args.processor_revision,
             }
         )
 
