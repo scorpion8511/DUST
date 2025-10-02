@@ -1,39 +1,26 @@
-"""Feature extraction pipeline for MUSK multimodal encoders.
-
-This script mirrors ``plip_feature_extraction.py`` but targets the official
-MUSK repository (https://github.com/lilab-stanford/MUSK) via the Hugging Face
-``transformers`` loader. Given a CSV manifest describing paired image/text
-patches, the script aggregates per-region embeddings grouped by magnification
-so they can be scored by ``multimodal_scoring.py``.
-
-The MUSK repo exports checkpoints with custom code, so the loader enables
-``trust_remote_code`` when initialising the processor/model pair. The encoder
-expects the model to expose ``get_image_features``/``get_text_features`` (as in
-`CLIPModel`) or ``encode_image``/``encode_text`` (as in the repository demos);
-otherwise the script falls back to the raw forward pass and looks for common
-feature keys (``image_embeds``/``text_embeds``).
-"""
+"""Extract MUSK vision-language features from CSV manifests."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import sys
 from collections import OrderedDict
-from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Union
 
 import torch
 import torch.nn.functional as F
+from torch import Tensor
 from torch.utils.data import DataLoader
 
 from multimodal_feature_extraction import ImageTextCSVDataset
 
-DEFAULT_PROCESSOR_FALLBACKS: Tuple[str, ...] = (
-    "openai/clip-vit-large-patch14",
-    "openai/clip-vit-base-patch32",
-)
+try:  # pragma: no cover - optional dependency
+    from huggingface_hub import login as hf_login
+except Exception:  # pragma: no cover - handled at runtime
+    hf_login = None  # type: ignore
 
 
 @dataclass
@@ -41,10 +28,10 @@ class RegionAccumulator:
     """Stores embeddings and metadata for a spatial region."""
 
     region_id: str
-    text_sum: Optional[torch.Tensor] = None
+    text_sum: Optional[Tensor] = None
     text_count: int = 0
     text_values: List[str] = field(default_factory=list)
-    images: Dict[int, torch.Tensor] = field(default_factory=dict)
+    images: Dict[int, Tensor] = field(default_factory=dict)
     metadata: Dict[str, object] = field(
         default_factory=lambda: {"patches": {}, "samples": [], "csv_region_ids": set()}
     )
@@ -76,233 +63,211 @@ def build_collate_fn():
     return collate
 
 
-def _select_from_outputs(outputs, keys: Iterable[str]) -> torch.Tensor:
-    """Extract a tensor from a forward pass output structure."""
-
-    if isinstance(outputs, torch.Tensor):
-        return outputs
-
-    if isinstance(outputs, Mapping):
-        for key in keys:
-            value = outputs.get(key)
-            if value is not None:
-                if isinstance(value, torch.Tensor):
-                    return value
-                if hasattr(value, "to"):
-                    return torch.as_tensor(value)
-    for key in keys:
-        value = getattr(outputs, key, None)
-        if value is not None:
-            if isinstance(value, torch.Tensor):
-                return value
-            if hasattr(value, "to"):
-                return torch.as_tensor(value)
-
-    raise RuntimeError(f"Unable to locate any of the keys {list(keys)} in the model outputs")
+def _to_device(value: Union[Tensor, Mapping[str, Tensor]], device: torch.device) -> Union[Tensor, Mapping[str, Tensor]]:
+    if isinstance(value, Mapping):
+        return {key: tensor.to(device) for key, tensor in value.items()}
+    return value.to(device)
 
 
-class MUSKEncoder:
-    """Thin wrapper around the MUSK Hugging Face checkpoint."""
+class MUSKBackbone:
+    """Wrapper around the official MUSK timm checkpoint."""
 
     def __init__(
         self,
-        model_name_or_path: str,
+        model_name: str,
+        checkpoint: str,
         device: str,
-        revision: Optional[str] = None,
-        precision: str = "fp32",
-        trust_remote_code: bool = True,
-        token: Optional[str] = None,
-        processor_name_or_path: Optional[str] = None,
-        processor_revision: Optional[str] = None,
+        dtype: str = "fp16",
+        ms_augment: bool = True,
+        image_size: int = 384,
+        antialias: bool = True,
+        text_tokenizer: Optional[str] = None,
+        login_token: Optional[str] = None,
+        musk_repo_root: Optional[str] = None,
+        strict_checkpoint_key: str = "model|module",
+        text_max_length: Optional[int] = None,
     ) -> None:
+        if musk_repo_root:
+            sys.path.insert(0, os.path.abspath(musk_repo_root))
+
         try:
-            from transformers import AutoModel, AutoProcessor
+            from musk import utils as musk_utils  # type: ignore
         except ImportError as exc:  # pragma: no cover - handled at runtime
             raise ImportError(
-                "transformers is required for MUSK feature extraction; install it with"
-                " `pip install transformers`"
+                "Could not import the `musk` package. Clone https://github.com/lilab-stanford/MUSK"
+                " and provide --musk-repo or install it via `pip install -e .`."
             ) from exc
 
-        if device.startswith("cuda") and not torch.cuda.is_available():
-            raise RuntimeError(
-                "CUDA device requested but torch.cuda.is_available() is False. "
-                "Pass --device cpu or install CUDA drivers."
-            )
-        self.device = torch.device(device)
-        precision = precision.lower()
-        dtype_map = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
-        if precision not in dtype_map:
-            raise ValueError(
-                f"Unsupported precision '{precision}'. Choose from {sorted(dtype_map.keys())}."
-            )
-        self.dtype = dtype_map[precision]
-
-        if self.device.type != "cuda" and self.dtype != torch.float32:
-            # Non-fp32 dtypes are unsafe on CPU; fall back to fp32 with a warning.
-            self.dtype = torch.float32
-
-        token = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
-
-        processor_target = processor_name_or_path or model_name_or_path
-
-        processor_kwargs = {
-            "trust_remote_code": trust_remote_code,
-        }
-        model_kwargs = {
-            "trust_remote_code": trust_remote_code,
-        }
-        if revision is not None:
-            if processor_name_or_path is None and processor_revision is None:
-                processor_kwargs["revision"] = revision
-            model_kwargs["revision"] = revision
-        if processor_revision is not None:
-            processor_kwargs["revision"] = processor_revision
-        if token is not None:
-            processor_kwargs["token"] = token
-            model_kwargs["token"] = token
-
-        processor: Optional[object] = None
-        processor_source = processor_target
-        processor_error: Optional[Exception] = None
-        clip_errors: List[Tuple[str, Exception]] = []
         try:
-            processor = AutoProcessor.from_pretrained(
-                processor_target,
-                **processor_kwargs,
-            )
-        except (OSError, ValueError) as exc:
-            processor_error = exc
+            import timm
+        except ImportError as exc:  # pragma: no cover - handled at runtime
+            raise ImportError("timm is required for MUSK feature extraction; install it via `pip install timm`."
+            ) from exc
 
-        if processor is None:
-            try:
-                from transformers import CLIPProcessor  # type: ignore
-            except ImportError as clip_import_exc:  # pragma: no cover - handled at runtime
-                if processor_error is not None:
-                    raise processor_error from clip_import_exc
-                raise clip_import_exc
+        try:
+            import torchvision.transforms as T
+            from timm.data.constants import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
+        except ImportError as exc:  # pragma: no cover - handled at runtime
+            raise ImportError(
+                "torchvision is required for MUSK preprocessing; install it via `pip install torchvision`."
+            ) from exc
 
-            clip_kwargs = {}
-            if processor_revision is not None:
-                clip_kwargs["revision"] = processor_revision
-            elif revision is not None and processor_name_or_path is None:
-                clip_kwargs["revision"] = revision
-            if token is not None:
-                clip_kwargs["token"] = token
-            try:
-                processor = CLIPProcessor.from_pretrained(
-                    processor_target,
-                    **clip_kwargs,
+        if login_token:
+            if hf_login is None:  # pragma: no cover - handled at runtime
+                raise ImportError(
+                    "huggingface_hub is required for authentication; install it via `pip install huggingface-hub`."
                 )
-            except Exception as clip_exc:
-                clip_errors.append((processor_target, clip_exc))
-                fallback_candidates: Tuple[str, ...] = ()
-                if processor_name_or_path is None:
-                    fallback_candidates = tuple(
-                        candidate
-                        for candidate in DEFAULT_PROCESSOR_FALLBACKS
-                        if candidate != processor_target
-                    )
-                last_exc: Optional[Exception] = clip_exc
-                for candidate in fallback_candidates:
-                    try:
-                        processor = CLIPProcessor.from_pretrained(candidate)
-                        processor_source = candidate
-                        last_exc = None
-                        break
-                    except Exception as candidate_exc:  # pragma: no cover - fallback failures
-                        clip_errors.append((candidate, candidate_exc))
-                        last_exc = candidate_exc
-                if processor is None:
-                    error_fragments: List[str] = []
-                    if processor_error is not None:
-                        error_fragments.append(
-                            f"AutoProcessor({processor_target}): {processor_error}"
-                        )
-                    for name, err in clip_errors:
-                        error_fragments.append(f"CLIPProcessor({name}): {err}")
-                    message = "Failed to load a processor for the MUSK checkpoint. "
-                    message += " | ".join(error_fragments)
-                    raise RuntimeError(message) from last_exc
+            hf_login(token=login_token, add_to_git_credential=False)
 
-        self.processor = processor
-        self.processor_source = processor_source
+        precision_map = {"fp16": torch.float16, "fp32": torch.float32, "bf16": torch.bfloat16}
+        dtype = dtype.lower()
+        if dtype not in precision_map:
+            raise ValueError(f"Unsupported precision '{dtype}'. Choose from {sorted(precision_map)}.")
+        target_dtype = precision_map[dtype]
 
-        self.model = AutoModel.from_pretrained(
-            model_name_or_path,
-            **model_kwargs,
+        self.device = torch.device(device)
+        if self.device.type == "cpu" and target_dtype != torch.float32:
+            target_dtype = torch.float32
+
+        self.ms_augment = ms_augment
+        self.target_dtype = target_dtype
+        self.text_max_length = text_max_length
+
+        self.model = timm.models.create_model(model_name, pretrained=False)
+        musk_utils.load_model_and_may_interpolate(
+            checkpoint,
+            self.model,
+            strict_checkpoint_key,
+            "",
         )
-        self.model.to(self.device)
+        self.model.to(device=self.device, dtype=self.target_dtype)
         self.model.eval()
 
-    def _autocast(self):
-        if self.device.type == "cuda" and self.dtype != torch.float32:
-            return torch.cuda.amp.autocast(dtype=self.dtype)
-        return nullcontext()
+        interpolation_attr = getattr(T, "InterpolationMode", None)
+        if interpolation_attr is not None:
+            interpolation = getattr(interpolation_attr, "BICUBIC", 3)
+        else:
+            interpolation = 3
+        self.transform = T.Compose(
+            [
+                T.Resize(image_size, interpolation=interpolation, antialias=antialias),
+                T.CenterCrop((image_size, image_size)),
+                T.ToTensor(),
+                T.Normalize(mean=IMAGENET_INCEPTION_MEAN, std=IMAGENET_INCEPTION_STD),
+            ]
+        )
 
-    def _process_images(self, images: Sequence[object]) -> Mapping[str, torch.Tensor]:
-        try:
-            encoded = self.processor(images=images, return_tensors="pt")
-        except TypeError:
-            encoded = self.processor(images=images)
-        if not isinstance(encoded, Mapping):
-            raise TypeError("Processor returned a non-mapping structure for images")
-        tensorised = {
-            key: value.to(self.device)
-            for key, value in encoded.items()
-            if hasattr(value, "to")
-        }
-        return tensorised
+        self.tokenizer = self._build_tokenizer(text_tokenizer)
 
-    def _process_text(self, texts: Sequence[str]) -> Mapping[str, torch.Tensor]:
-        for key in ("text", "texts", "input_text"):
+    def _infer_default_tokenizer_name(self) -> Optional[str]:
+        cfg = getattr(self.model, "default_cfg", None)
+        if isinstance(cfg, Mapping):
+            for key in ("text_tokenizer", "tokenizer", "hf_tokenizer"):
+                value = cfg.get(key)
+                if value:
+                    return str(value)
+        return None
+
+    def _build_tokenizer(self, override: Optional[str]):
+        tokenizer_name = override or self._infer_default_tokenizer_name()
+
+        tokeniser = None
+        errors: List[str] = []
+
+        if tokenizer_name:
             try:
-                encoded = self.processor(
-                    **{key: texts}, padding=True, truncation=True, return_tensors="pt"
-                )
-                break
-            except TypeError:
-                encoded = None
-        if encoded is None:
-            raise TypeError(
-                "Processor does not accept `text`/`texts`/`input_text` keyword arguments."
-            )
-        if not isinstance(encoded, Mapping):
-            raise TypeError("Processor returned a non-mapping structure for text")
-        tensorised = {
-            key: value.to(self.device)
-            for key, value in encoded.items()
-            if hasattr(value, "to")
-        }
+                from musk import utils as musk_utils  # type: ignore
+
+                if hasattr(musk_utils, "get_tokenizer"):
+                    tokeniser = musk_utils.get_tokenizer(tokenizer_name)
+                elif hasattr(musk_utils, "create_tokenizer"):
+                    tokeniser = musk_utils.create_tokenizer(tokenizer_name)
+            except Exception as exc:  # pragma: no cover - best effort
+                errors.append(f"musk.utils tokenizer '{tokenizer_name}' failed: {exc}")
+
+        if tokeniser is None:
+            try:
+                import open_clip  # type: ignore
+
+                resolved = override or tokenizer_name or "ViT-L-14"
+                tokeniser = open_clip.get_tokenizer(resolved)
+                tokenizer_name = resolved
+            except Exception as exc:  # pragma: no cover - handled at runtime
+                errors.append(f"open_clip.get_tokenizer failed: {exc}")
+
+        if tokeniser is None:
+            error_message = "Unable to instantiate a tokenizer for MUSK."
+            if errors:
+                error_message += " Errors: " + " | ".join(errors)
+            raise RuntimeError(error_message)
+
+        self.tokenizer_name = tokenizer_name
+        return tokeniser
+
+    def _run_model(self, **kwargs):
+        common_kwargs = dict(with_head=False, out_norm=False, return_global=True)
+        if "image" in kwargs and self.ms_augment:
+            common_kwargs["ms_aug"] = True
+        try:
+            return self.model(**common_kwargs, **kwargs)
+        except TypeError:
+            return self.model(**kwargs)
+
+    def encode_images(self, images: Sequence[object]) -> Tensor:
+        tensors = [self.transform(image).to(self.target_dtype) for image in images]
+        batch = torch.stack(tensors, dim=0).to(self.device)
+
+        with torch.no_grad():
+            if hasattr(self.model, "encode_image"):
+                outputs = self.model.encode_image(batch)
+            else:
+                outputs = self._run_model(image=batch)
+
+        if isinstance(outputs, (tuple, list)) and len(outputs) >= 1:
+            image_features = outputs[0]
+        else:
+            image_features = outputs
+
+        return image_features.detach().to("cpu", dtype=torch.float32)
+
+    def _prepare_text_inputs(self, texts: Sequence[str]) -> Union[Tensor, Mapping[str, Tensor]]:
+        tokenizer = self.tokenizer
+        tokens = tokenizer(texts)
+        if isinstance(tokens, Mapping):
+            tensorised = {key: torch.as_tensor(value) for key, value in tokens.items()}
+        else:
+            tensorised = torch.as_tensor(tokens)
+
+        if self.text_max_length is not None:
+            if isinstance(tensorised, Mapping):
+                for key, value in tensorised.items():
+                    tensorised[key] = value[..., : self.text_max_length]
+            else:
+                tensorised = tensorised[..., : self.text_max_length]
+
         return tensorised
 
-    def encode_images(self, images: Sequence[object]) -> torch.Tensor:
-        inputs = self._process_images(images)
-        with torch.no_grad(), self._autocast():
-            if hasattr(self.model, "get_image_features"):
-                features = self.model.get_image_features(**inputs)
-            elif hasattr(self.model, "encode_image"):
-                features = self.model.encode_image(**inputs)
-            else:
-                outputs = self.model(**inputs)
-                features = _select_from_outputs(outputs, ["image_embeds", "image_features"])
-        return features.detach().cpu().float()
+    def encode_text(self, texts: Sequence[str]) -> Tensor:
+        tokens = self._prepare_text_inputs(texts)
+        tokens = _to_device(tokens, self.device)
 
-    def encode_text(self, texts: Sequence[str]) -> torch.Tensor:
-        inputs = self._process_text(texts)
-        with torch.no_grad(), self._autocast():
-            if hasattr(self.model, "get_text_features"):
-                features = self.model.get_text_features(**inputs)
-            elif hasattr(self.model, "encode_text"):
-                features = self.model.encode_text(**inputs)
+        with torch.no_grad():
+            if hasattr(self.model, "encode_text"):
+                text_features = self.model.encode_text(tokens)
             else:
-                outputs = self.model(**inputs)
-                features = _select_from_outputs(outputs, ["text_embeds", "text_features"])
-        return features.detach().cpu().float()
+                kwargs = {"text": tokens}
+                outputs = self._run_model(**kwargs)
+                if isinstance(outputs, (tuple, list)) and len(outputs) >= 2:
+                    text_features = outputs[1]
+                else:
+                    text_features = outputs
+
+        return text_features.detach().to("cpu", dtype=torch.float32)
 
 
 def extract_musk_embeddings(
     dataloader: DataLoader,
-    encoder: MUSKEncoder,
+    backbone: MUSKBackbone,
     normalize: bool,
     magnifications: Optional[Sequence[int]],
     drop_missing: bool,
@@ -314,8 +279,8 @@ def extract_musk_embeddings(
         images = batch["images"]
         texts = batch["texts"]
 
-        image_embeddings = encoder.encode_images(images)
-        text_embeddings = encoder.encode_text(texts)
+        image_embeddings = backbone.encode_images(images)
+        text_embeddings = backbone.encode_text(texts)
 
         if normalize:
             image_embeddings = F.normalize(image_embeddings, dim=-1)
@@ -329,13 +294,12 @@ def extract_musk_embeddings(
             embedding_image = image_embeddings[idx]
             embedding_text = text_embeddings[idx]
 
-            current_text = texts[idx]
             if accumulator.text_sum is None:
                 accumulator.text_sum = embedding_text.clone()
             else:
                 accumulator.text_sum = accumulator.text_sum + embedding_text
             accumulator.text_count += 1
-            accumulator.text_values.append(current_text)
+            accumulator.text_values.append(texts[idx])
 
             accumulator.images[magnification] = embedding_image
             accumulator.metadata.setdefault("samples", []).append(batch["metadata"][idx])
@@ -356,7 +320,7 @@ def extract_musk_embeddings(
             )
 
     region_ids: List[str] = []
-    text_embeddings_out: List[torch.Tensor] = []
+    text_embeddings_out: List[Tensor] = []
     raw_texts: List[Optional[object]] = []
     csv_region_mapping: Dict[str, List[str]] = {}
     patches = {mag: [] for mag in ordered_magnifications}
@@ -376,10 +340,7 @@ def extract_musk_embeddings(
 
         if accumulator.text_values:
             unique_texts = list(OrderedDict.fromkeys(accumulator.text_values))
-            if len(unique_texts) == 1:
-                raw_texts.append(unique_texts[0])
-            else:
-                raw_texts.append(unique_texts)
+            raw_texts.append(unique_texts if len(unique_texts) > 1 else unique_texts[0])
         else:
             raw_texts.append(None)
 
@@ -400,7 +361,6 @@ def extract_musk_embeddings(
         else:
             continue
 
-        # When drop_missing removes a region, undo partial writes.
         region_ids.pop()
         text_embeddings_out.pop()
         raw_texts.pop()
@@ -415,7 +375,7 @@ def extract_musk_embeddings(
         )
 
     text_tensor = torch.stack(text_embeddings_out, dim=0)
-    image_tensors: Dict[int, torch.Tensor] = {}
+    image_tensors: Dict[int, Tensor] = {}
     for mag in ordered_magnifications:
         embeddings = [regions[r].images.get(mag) for r in region_ids]
         if any(embed is None for embed in embeddings):
@@ -456,61 +416,100 @@ def save_outputs(features: Mapping[str, object], output_path: str, metadata_json
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Extract MUSK features from a CSV manifest using transformers checkpoints."
+        description="Extract MUSK features from a CSV manifest using the official timm checkpoint."
     )
     parser.add_argument("csv", type=str, help="Path to the CSV file with image/text pairs.")
     parser.add_argument("output", type=str, help="Destination .pth file for the extracted features.")
 
     parser.add_argument(
-        "--model-name-or-path",
+        "--model-name",
         type=str,
-        default="lilab-stanford/musk",
-        help="Identifier or local path for the MUSK checkpoint (default: lilab-stanford/musk).",
+        default="musk_large_patch16_384",
+        help="MUSK timm model identifier (default: musk_large_patch16_384).",
     )
     parser.add_argument(
-        "--processor-name-or-path",
+        "--checkpoint",
         type=str,
-        default=None,
-        help=(
-            "Optional processor identifier when the MUSK repository lacks processor configs. "
-            "Defaults to --model-name-or-path when unset."
-        ),
+        default="hf_hub:xiangjx/musk",
+        help="Checkpoint identifier passed to musk.utils.load_model_and_may_interpolate.",
     )
     parser.add_argument(
-        "--processor-revision",
+        "--checkpoint-key",
         type=str,
-        default=None,
-        help="Optional revision/tag to use when downloading the processor checkpoint.",
+        default="model|module",
+        help="Regex describing the checkpoint key containing weights (default: model|module).",
     )
-    parser.add_argument("--revision", type=str, default=None, help="Optional model revision/tag to load.")
     parser.add_argument(
-        "--hf-token",
+        "--device",
         type=str,
-        default=None,
-        help=(
-            "Authentication token for gated/private Hugging Face repositories. "
-            "Defaults to the HF_TOKEN/HUGGINGFACE_TOKEN environment variables when unset."
-        ),
+        default="cuda:0",
+        help="Torch device used for MUSK inference (default: cuda:0).",
     )
     parser.add_argument(
         "--precision",
         type=str,
-        default="fp32",
-        choices=["fp32", "fp16", "bf16"],
-        help="Floating point precision used during inference (default: fp32).",
+        default="fp16",
+        choices=["fp16", "fp32", "bf16"],
+        help="Floating point precision used during inference (default: fp16).",
     )
     parser.add_argument(
-        "--no-trust-remote-code",
-        dest="trust_remote_code",
+        "--no-ms-augment",
+        dest="ms_augment",
         action="store_false",
-        help="Disable trust_remote_code when loading the MUSK checkpoint.",
+        help="Disable multi-scale augmentation when encoding images.",
     )
-    parser.set_defaults(trust_remote_code=True)
+    parser.set_defaults(ms_augment=True)
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=384,
+        help="Input resolution for MUSK preprocessing (default: 384).",
+    )
+    parser.add_argument(
+        "--no-antialias",
+        dest="antialias",
+        action="store_false",
+        help="Disable anti-aliased resizing during preprocessing.",
+    )
+    parser.set_defaults(antialias=True)
+    parser.add_argument(
+        "--text-tokenizer",
+        type=str,
+        default=None,
+        help="Optional tokenizer name; defaults to the model configuration or ViT-L-14 for open_clip.",
+    )
+    parser.add_argument(
+        "--text-max-length",
+        type=int,
+        default=None,
+        help="Optional maximum number of tokens fed to the MUSK text encoder.",
+    )
+    parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="Hugging Face token used to login before downloading checkpoints.",
+    )
+    parser.add_argument(
+        "--musk-repo",
+        type=str,
+        default=None,
+        help="Optional path to a local MUSK repository clone added to PYTHONPATH before importing.",
+    )
 
     parser.add_argument("--image-root", type=str, default=None, help="Optional root to prepend to relative image paths.")
-    parser.add_argument("--device", type=str, default="cuda:0", help="Torch device used for MUSK inference.")
-    parser.add_argument("--batch-size", type=int, default=16, help="Number of samples per DataLoader batch.")
-    parser.add_argument("--num-workers", type=int, default=4, help="Number of DataLoader worker processes.")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        help="Number of samples per DataLoader batch (default: 16).",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of DataLoader worker processes (default: 4).",
+    )
     parser.add_argument(
         "--no-normalize",
         dest="normalize",
@@ -535,7 +534,11 @@ def build_argparser() -> argparse.ArgumentParser:
         default=None,
         help="Fallback square size when only patch coordinates are supplied.",
     )
-    parser.add_argument("--strict-files", action="store_true", help="Raise if image files referenced in the CSV are missing.")
+    parser.add_argument(
+        "--strict-files",
+        action="store_true",
+        help="Raise if image files referenced in the CSV are missing.",
+    )
     parser.add_argument(
         "--strip-region-suffix",
         action="store_true",
@@ -592,29 +595,32 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         filter_values=args.filter_values,
     )
 
-    collate_fn = build_collate_fn()
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         shuffle=False,
-        collate_fn=collate_fn,
+        collate_fn=build_collate_fn(),
     )
 
-    encoder = MUSKEncoder(
-        model_name_or_path=args.model_name_or_path,
-        revision=args.revision,
+    backbone = MUSKBackbone(
+        model_name=args.model_name,
+        checkpoint=args.checkpoint,
         device=args.device,
-        precision=args.precision,
-        trust_remote_code=args.trust_remote_code,
-        token=args.hf_token,
-        processor_name_or_path=args.processor_name_or_path,
-        processor_revision=args.processor_revision,
+        dtype=args.precision,
+        ms_augment=args.ms_augment,
+        image_size=args.image_size,
+        antialias=args.antialias,
+        text_tokenizer=args.text_tokenizer,
+        login_token=args.hf_token,
+        musk_repo_root=args.musk_repo,
+        strict_checkpoint_key=args.checkpoint_key,
+        text_max_length=args.text_max_length,
     )
 
     features = extract_musk_embeddings(
         dataloader=loader,
-        encoder=encoder,
+        backbone=backbone,
         normalize=args.normalize,
         magnifications=args.magnifications,
         drop_missing=args.drop_missing,
@@ -622,20 +628,14 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
 
     metadata = features.get("metadata")
     if isinstance(metadata, dict):
-        requested_processor = args.processor_name_or_path or args.model_name_or_path
         metadata.update(
             {
-                "musk_model": args.model_name_or_path,
-                "musk_revision": args.revision,
+                "musk_model": args.model_name,
+                "musk_checkpoint": args.checkpoint,
                 "precision": args.precision,
-                "musk_processor": getattr(encoder, "processor_source", requested_processor),
-                "musk_processor_requested": requested_processor,
-                "musk_processor_revision": (
-                    args.processor_revision
-                    if getattr(encoder, "processor_source", requested_processor)
-                    == requested_processor
-                    else None
-                ),
+                "ms_augment": args.ms_augment,
+                "text_tokenizer": getattr(backbone, "tokenizer_name", args.text_tokenizer),
+                "image_size": args.image_size,
             }
         )
 
@@ -651,4 +651,3 @@ def main() -> None:  # pragma: no cover - CLI entry point
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
     main()
-

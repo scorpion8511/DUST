@@ -126,44 +126,41 @@ caption in the exported metadata. The resulting metadata dictionary captures the
 resolved region ids, original CSV identifiers, per-magnification patch geometry,
 and the PLIP model identifier for auditability.
 
-### MUSK transformers extractor
+### MUSK timm extractor
 
-The MUSK repository publishes Hugging Face checkpoints that can be consumed with
-`transformers`. The `musk_feature_extraction.py` helper mirrors the CSV schema
-accepted by the TorchScript and PLIP pipelines while loading the configured MUSK
-model via `AutoProcessor`/`AutoModel` (with `trust_remote_code` enabled by
-default so the repository's custom modules can be used).
+`musk_feature_extraction.py` now follows the official MUSK instructions: the
+script boots a timm backbone, loads weights via
+`musk.utils.load_model_and_may_interpolate`, and reproduces the resize / crop /
+normalisation recipe from the repository demos. The helper accepts the same CSV
+schema as the TorchScript and PLIP pipelines while outputting a `.pth` archive
+that is immediately compatible with `multimodal_scoring.py`.
 
 ```bash
 python musk_feature_extraction.py manifest.csv musk_features.pth \
-    --model-name-or-path /home/jovyan/work/MUSK \
-    --processor-name-or-path openai/clip-vit-large-patch14 \
-    --revision main --device cuda:0 \
-    --hf-token $HF_TOKEN \
+    --hf-token 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 \
+    --model-name musk_large_patch16_384 \
+    --checkpoint hf_hub:xiangjx/musk \
+    --device cuda:0 --precision fp16 \
     --image-root /home/jovyan/work/tran_est/multires_VL/output \
     --image-column patch_path --text-column generated_text \
     --magnification-column patch_scale --region-column patch_id \
-    --strip-region-suffix --filter-column is_test --filter-values 0 \
-    --metadata-json musk_metadata.json
+    --strip-region-suffix --metadata-json musk_metadata.json
 ```
 
-By default the loader performs L2 normalisation on both modalities and averages
-multiple captions per region (preserving every unique caption inside the
-metadata). Supply `--precision` to control autocast (`fp32`, `fp16`, or `bf16`)
-and `--no-trust-remote-code` if you vendor the MUSK code locally and prefer to
-disable custom model execution. Private or gated Hugging Face checkpoints can be
-accessed by providing `--hf-token` (or exporting an `HF_TOKEN`/`HUGGINGFACE_TOKEN`
-environment variable). Some MUSK releases omit processor configuration files on
-the Hub; in those cases, supply `--processor-name-or-path` (and optionally
-`--processor-revision`) with a compatible CLIP processor, such as
-`openai/clip-vit-large-patch14`, or point to a local preprocessor directory. When
-no processor identifier is provided and the checkpoint lacks configs, the script
-automatically falls back to common CLIP preprocessors (starting with
-`openai/clip-vit-large-patch14`) so authenticated downloads using a token like
-`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` succeed without additional flags. The
-exported `.pth` archive aligns with
-`multimodal_scoring.py`, enabling direct MSCI/CMI-LB computation alongside the
-TorchScript and PLIP features.
+Pass `--hf-token` to authenticate against the gated Hugging Face repository (the
+script calls `huggingface_hub.login` for you) or leave it unset after running
+`huggingface-cli login` manually. When the MUSK code lives outside the Python
+path, point `--musk-repo` at a local clone to mirror `sys.path` setup from the
+demo notebook. The text branch defaults to the tokenizer advertised by the
+model; override it with `--text-tokenizer` if you need a specific `open_clip`
+tokeniser or want to cap the context length via `--text-max-length`.
+
+Embeddings are L2-normalised by default, and repeated captions for the same
+region are averaged while retaining every unique description inside the exported
+metadata. Additional flags mirror the other extractors: `--filter-column`,
+`--strip-region-suffix`, `--drop-missing`, and magnification controls behave the
+same way, ensuring MUSK features slot directly into the MSCI and CMI-LB scoring
+pipelines.
 
 ## Multimodal transferability metrics
 
