@@ -126,6 +126,33 @@ caption in the exported metadata. The resulting metadata dictionary captures the
 resolved region ids, original CSV identifiers, per-magnification patch geometry,
 and the PLIP model identifier for auditability.
 
+### MUSK transformers extractor
+
+The MUSK repository publishes Hugging Face checkpoints that can be consumed with
+`transformers`. The `musk_feature_extraction.py` helper mirrors the CSV schema
+accepted by the TorchScript and PLIP pipelines while loading the configured MUSK
+model via `AutoProcessor`/`AutoModel` (with `trust_remote_code` enabled by
+default so the repository's custom modules can be used).
+
+```bash
+python musk_feature_extraction.py manifest.csv musk_features.pth \
+    --model-name-or-path /home/jovyan/work/MUSK \
+    --revision main --device cuda:0 \
+    --image-root /home/jovyan/work/tran_est/multires_VL/output \
+    --image-column patch_path --text-column generated_text \
+    --magnification-column patch_scale --region-column patch_id \
+    --strip-region-suffix --filter-column is_test --filter-values 0 \
+    --metadata-json musk_metadata.json
+```
+
+By default the loader performs L2 normalisation on both modalities and averages
+multiple captions per region (preserving every unique caption inside the
+metadata). Supply `--precision` to control autocast (`fp32`, `fp16`, or `bf16`)
+and `--no-trust-remote-code` if you vendor the MUSK code locally and prefer to
+disable custom model execution. The exported `.pth` archive aligns with
+`multimodal_scoring.py`, enabling direct MSCI/CMI-LB computation alongside the
+TorchScript and PLIP features.
+
 ## Multimodal transferability metrics
 
 `multimodal_scoring.py` implements the Magnification-Scale Consistency
