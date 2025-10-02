@@ -138,6 +138,7 @@ default so the repository's custom modules can be used).
 python musk_feature_extraction.py manifest.csv musk_features.pth \
     --model-name-or-path /home/jovyan/work/MUSK \
     --revision main --device cuda:0 \
+    --hf-token $HF_TOKEN \
     --image-root /home/jovyan/work/tran_est/multires_VL/output \
     --image-column patch_path --text-column generated_text \
     --magnification-column patch_scale --region-column patch_id \
@@ -149,7 +150,9 @@ By default the loader performs L2 normalisation on both modalities and averages
 multiple captions per region (preserving every unique caption inside the
 metadata). Supply `--precision` to control autocast (`fp32`, `fp16`, or `bf16`)
 and `--no-trust-remote-code` if you vendor the MUSK code locally and prefer to
-disable custom model execution. The exported `.pth` archive aligns with
+disable custom model execution. Private or gated Hugging Face checkpoints can be
+accessed by providing `--hf-token` (or exporting an `HF_TOKEN`/`HUGGINGFACE_TOKEN`
+environment variable). The exported `.pth` archive aligns with
 `multimodal_scoring.py`, enabling direct MSCI/CMI-LB computation alongside the
 TorchScript and PLIP features.
 

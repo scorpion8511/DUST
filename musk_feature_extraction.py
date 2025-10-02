@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -105,6 +106,7 @@ class MUSKEncoder:
         revision: Optional[str] = None,
         precision: str = "fp32",
         trust_remote_code: bool = True,
+        token: Optional[str] = None,
     ) -> None:
         try:
             from transformers import AutoModel, AutoProcessor
@@ -132,11 +134,50 @@ class MUSKEncoder:
             # Non-fp32 dtypes are unsafe on CPU; fall back to fp32 with a warning.
             self.dtype = torch.float32
 
-        self.processor = AutoProcessor.from_pretrained(
-            model_name_or_path, revision=revision, trust_remote_code=trust_remote_code
-        )
+        token = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+
+        processor_kwargs = {
+            "trust_remote_code": trust_remote_code,
+        }
+        model_kwargs = {
+            "trust_remote_code": trust_remote_code,
+        }
+        if revision is not None:
+            processor_kwargs["revision"] = revision
+            model_kwargs["revision"] = revision
+        if token is not None:
+            processor_kwargs["token"] = token
+            model_kwargs["token"] = token
+
+        processor_error: Optional[Exception] = None
+        try:
+            self.processor = AutoProcessor.from_pretrained(
+                model_name_or_path,
+                **processor_kwargs,
+            )
+        except (OSError, ValueError) as exc:
+            processor_error = exc
+            try:
+                from transformers import CLIPProcessor  # type: ignore
+
+                clip_kwargs = {}
+                if revision is not None:
+                    clip_kwargs["revision"] = revision
+                if token is not None:
+                    clip_kwargs["token"] = token
+                self.processor = CLIPProcessor.from_pretrained(
+                    model_name_or_path,
+                    **clip_kwargs,
+                )
+            except Exception as clip_exc:  # pragma: no cover - error propagation path
+                raise type(clip_exc)(
+                    "Failed to load a processor for the MUSK checkpoint. "
+                    "Tried AutoProcessor (error: %s) and CLIPProcessor (error: %s)." %
+                    (processor_error, clip_exc)
+                ) from clip_exc
         self.model = AutoModel.from_pretrained(
-            model_name_or_path, revision=revision, trust_remote_code=trust_remote_code
+            model_name_or_path,
+            **model_kwargs,
         )
         self.model.to(self.device)
         self.model.eval()
@@ -376,6 +417,15 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--revision", type=str, default=None, help="Optional model revision/tag to load.")
     parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help=(
+            "Authentication token for gated/private Hugging Face repositories. "
+            "Defaults to the HF_TOKEN/HUGGINGFACE_TOKEN environment variables when unset."
+        ),
+    )
+    parser.add_argument(
         "--precision",
         type=str,
         default="fp32",
@@ -490,6 +540,7 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         device=args.device,
         precision=args.precision,
         trust_remote_code=args.trust_remote_code,
+        token=args.hf_token,
     )
 
     features = extract_musk_embeddings(
