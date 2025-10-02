@@ -91,6 +91,7 @@ class MUSKBackbone:
             sys.path.insert(0, os.path.abspath(musk_repo_root))
 
         try:
+            from musk import modeling as _musk_modeling  # type: ignore  # noqa: F401
             from musk import utils as musk_utils  # type: ignore
         except ImportError as exc:  # pragma: no cover - handled at runtime
             raise ImportError(
