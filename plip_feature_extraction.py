@@ -46,6 +46,7 @@ class RegionAccumulator:
     region_id: str
     text_embedding: Optional[torch.Tensor] = None
     text_value: Optional[str] = None
+    text_count: int = 0
     images: Dict[int, torch.Tensor] = field(default_factory=dict)
     metadata: Dict[str, object] = field(
         default_factory=lambda: {"patches": {}, "samples": [], "csv_region_ids": set()}
@@ -111,15 +112,27 @@ def extract_plip_embeddings(
             embedding_image = image_embeddings[idx].cpu()
             embedding_text = text_embeddings[idx].cpu()
 
+            current_text = texts[idx]
             if accumulator.text_embedding is None:
                 accumulator.text_embedding = embedding_text
-                accumulator.text_value = texts[idx]
+                accumulator.text_value = current_text
+                accumulator.text_count = 1
             else:
-                if torch.norm(accumulator.text_embedding - embedding_text).item() > 1e-4:
+                if accumulator.text_value != current_text:
                     raise ValueError(
-                        f"Mismatched text embeddings detected for region {region_id};"
-                        " ensure each region uses a single caption."
+                        f"Mismatched captions detected for region {region_id}:"
+                        f" '{accumulator.text_value}' vs '{current_text}'."
                     )
+
+                accumulator.text_count += 1
+                step = 1.0 / float(accumulator.text_count)
+                accumulator.text_embedding = accumulator.text_embedding + (
+                    embedding_text - accumulator.text_embedding
+                ) * step
+                if normalize:
+                    accumulator.text_embedding = F.normalize(
+                        accumulator.text_embedding.unsqueeze(0), dim=-1
+                    ).squeeze(0)
 
             accumulator.images[magnification] = embedding_image
             accumulator.metadata.setdefault("samples", []).append(batch["metadata"][idx])
