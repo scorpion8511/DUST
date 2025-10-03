@@ -33,7 +33,7 @@ class _SentencePieceTokenizerWrapper:
         self._max_length = max_length
 
     def __call__(self, texts: Sequence[str]) -> Mapping[str, Tensor]:
-        max_len = self._max_length or 100
+        max_len = self._max_length or 1024
         txt_ids, padding = self._musk_utils.xlm_tokenizer(
             texts,
             self._tokenizer,
@@ -178,6 +178,9 @@ class MUSKBackbone:
         self.model.to(device=self.device, dtype=self.target_dtype)
         self.model.eval()
 
+        if self.text_max_length is None:
+            self.text_max_length = self._infer_model_text_length() or 1024
+
         interpolation_attr = getattr(T, "InterpolationMode", None)
         if interpolation_attr is not None:
             interpolation = getattr(interpolation_attr, "BICUBIC", 3)
@@ -211,6 +214,27 @@ class MUSKBackbone:
                 value = cfg.get(key)
                 if value:
                     return str(value)
+        return None
+
+    def _infer_model_text_length(self) -> Optional[int]:
+        candidate_keys = (
+            "text_len",
+            "text_length",
+            "max_text_len",
+            "max_text_length",
+            "context_length",
+        )
+        for key in candidate_keys:
+            value = getattr(self.model, key, None)
+            if isinstance(value, int) and value > 0:
+                return value
+
+        cfg = getattr(self.model, "default_cfg", None)
+        if isinstance(cfg, Mapping):
+            for key in ("text_len", "text_length", "context_length"):
+                value = cfg.get(key)
+                if isinstance(value, int) and value > 0:
+                    return value
         return None
 
     def _build_tokenizer(self, override: Optional[str]) -> Tuple[object, Optional[str]]:

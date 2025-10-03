@@ -155,7 +155,9 @@ demo notebook. If the clone exposes `models/tokenizer.spm` the extractor wraps
 the official XLM-R SentencePiece tokenizer via `musk.utils.xlm_tokenizer`,
 matching the snippet from `demo.ipynb`. Provide `--text-tokenizer` to point at a
 custom `.spm` file or fall back to an `open_clip` vocabulary; combine it with
-`--text-max-length` to truncate captions as needed.
+`--text-max-length` to truncate captions as needed. When omitted, the extractor
+derives the model's text context length (1024 tokens for the released MUSK
+checkpoints) so the positional embeddings match the repository implementation.
 
 Embeddings are L2-normalised by default, and repeated captions for the same
 region are averaged while retaining every unique description inside the exported
