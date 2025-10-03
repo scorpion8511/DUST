@@ -9,7 +9,7 @@ import sys
 import types
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Sequence, Union
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -17,6 +17,32 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from multimodal_feature_extraction import ImageTextCSVDataset
+
+
+class _SentencePieceTokenizerWrapper:
+    """Adapter that mimics MUSK's notebook tokenization helpers."""
+
+    def __init__(
+        self,
+        base_tokenizer,
+        musk_utils_module,
+        max_length: Optional[int],
+    ) -> None:
+        self._tokenizer = base_tokenizer
+        self._musk_utils = musk_utils_module
+        self._max_length = max_length
+
+    def __call__(self, texts: Sequence[str]) -> Mapping[str, Tensor]:
+        max_len = self._max_length or 100
+        txt_ids, padding = self._musk_utils.xlm_tokenizer(
+            texts,
+            self._tokenizer,
+            max_len=max_len,
+        )
+        return {
+            "text_description": torch.as_tensor(txt_ids, dtype=torch.long),
+            "padding_mask": torch.as_tensor(padding, dtype=torch.bool),
+        }
 
 try:  # pragma: no cover - optional dependency
     from huggingface_hub import login as hf_login
@@ -102,6 +128,8 @@ class MUSKBackbone:
                 " and provide --musk-repo or install it via `pip install -e .`."
             ) from exc
 
+        self.musk_utils = musk_utils
+        
         try:
             import timm
         except ImportError as exc:  # pragma: no cover - handled at runtime
@@ -136,6 +164,7 @@ class MUSKBackbone:
         self.ms_augment = ms_augment
         self.target_dtype = target_dtype
         self.text_max_length = text_max_length
+        self.musk_repo_root = musk_repo_root
 
         self.model = timm.models.create_model(model_name, pretrained=False)
         musk_utils.load_model_and_may_interpolate(
@@ -161,7 +190,7 @@ class MUSKBackbone:
             ]
         )
 
-        self.tokenizer = self._build_tokenizer(text_tokenizer)
+        self.tokenizer, self.tokenizer_name = self._build_tokenizer(text_tokenizer)
 
     def _infer_default_tokenizer_name(self) -> Optional[str]:
         cfg = getattr(self.model, "default_cfg", None)
@@ -172,22 +201,28 @@ class MUSKBackbone:
                     return str(value)
         return None
 
-    def _build_tokenizer(self, override: Optional[str]):
+    def _build_tokenizer(self, override: Optional[str]) -> Tuple[object, Optional[str]]:
         tokenizer_name = override or self._infer_default_tokenizer_name()
 
-        tokeniser = None
+        tokeniser: Optional[object] = None
+        resolved_name: Optional[str] = tokenizer_name
         errors: List[str] = []
 
         if tokenizer_name:
             try:
-                from musk import utils as musk_utils  # type: ignore
-
-                if hasattr(musk_utils, "get_tokenizer"):
-                    tokeniser = musk_utils.get_tokenizer(tokenizer_name)
-                elif hasattr(musk_utils, "create_tokenizer"):
-                    tokeniser = musk_utils.create_tokenizer(tokenizer_name)
+                if hasattr(self.musk_utils, "get_tokenizer"):
+                    tokeniser = self.musk_utils.get_tokenizer(tokenizer_name)
+                elif hasattr(self.musk_utils, "create_tokenizer"):
+                    tokeniser = self.musk_utils.create_tokenizer(tokenizer_name)
             except Exception as exc:  # pragma: no cover - best effort
                 errors.append(f"musk.utils tokenizer '{tokenizer_name}' failed: {exc}")
+
+        if tokeniser is None:
+            tokeniser, resolved_name, error = self._build_sentencepiece_tokenizer(
+                tokenizer_name=override or tokenizer_name,
+            )
+            if error:
+                errors.append(error)
 
         if tokeniser is None:
             try:
@@ -195,7 +230,7 @@ class MUSKBackbone:
 
                 resolved = override or tokenizer_name or "ViT-L-14"
                 tokeniser = open_clip.get_tokenizer(resolved)
-                tokenizer_name = resolved
+                resolved_name = resolved
             except Exception as exc:  # pragma: no cover - handled at runtime
                 errors.append(f"open_clip.get_tokenizer failed: {exc}")
 
@@ -205,8 +240,69 @@ class MUSKBackbone:
                 error_message += " Errors: " + " | ".join(errors)
             raise RuntimeError(error_message)
 
-        self.tokenizer_name = tokenizer_name
-        return tokeniser
+        return tokeniser, resolved_name
+
+    def _candidate_sentencepiece_paths(self, hint: Optional[str]) -> List[str]:
+        candidates: List[str] = []
+
+        def _normalise(path: str) -> Optional[str]:
+            expanded = os.path.abspath(os.path.expanduser(path))
+            if os.path.isdir(expanded):
+                possible = [
+                    os.path.join(expanded, "tokenizer.spm"),
+                    os.path.join(expanded, "models", "tokenizer.spm"),
+                ]
+                return next((p for p in possible if os.path.exists(p)), None)
+            if os.path.isfile(expanded):
+                return expanded
+            return None
+
+        if hint:
+            normalised = _normalise(hint)
+            if normalised:
+                candidates.append(normalised)
+            elif self.musk_repo_root:
+                joined = _normalise(os.path.join(self.musk_repo_root, hint))
+                if joined:
+                    candidates.append(joined)
+
+        if self.musk_repo_root:
+            for suffix in ("tokenizer.spm", os.path.join("models", "tokenizer.spm")):
+                candidate = os.path.join(self.musk_repo_root, suffix)
+                if os.path.exists(candidate):
+                    candidates.append(os.path.abspath(candidate))
+
+        return list(dict.fromkeys(candidates))
+
+    def _build_sentencepiece_tokenizer(
+        self,
+        tokenizer_name: Optional[str],
+    ) -> Tuple[Optional[object], Optional[str], Optional[str]]:
+        candidates = self._candidate_sentencepiece_paths(tokenizer_name)
+        if not candidates:
+            return None, tokenizer_name, None
+
+        try:
+            from transformers import XLMRobertaTokenizer
+        except Exception as exc:  # pragma: no cover - handled at runtime
+            return None, tokenizer_name, f"transformers XLMRobertaTokenizer unavailable: {exc}"
+
+        last_error: Optional[str] = None
+        for candidate in candidates:
+            try:
+                base_tokenizer = XLMRobertaTokenizer(candidate, use_fast=False)
+                wrapper = _SentencePieceTokenizerWrapper(
+                    base_tokenizer,
+                    self.musk_utils,
+                    self.text_max_length,
+                )
+                name = candidate
+                if hasattr(base_tokenizer, "name_or_path"):
+                    name = str(base_tokenizer.name_or_path)
+                return wrapper, name, None
+            except Exception as exc:  # pragma: no cover - handled at runtime
+                last_error = f"XLMRobertaTokenizer failed for '{candidate}': {exc}"
+        return None, tokenizer_name, last_error
 
     def _ensure_fairscale_stub(self) -> None:
         try:  # pragma: no cover - optional dependency
@@ -276,9 +372,12 @@ class MUSKBackbone:
 
         with torch.no_grad():
             if hasattr(self.model, "encode_text"):
-                text_features = self.model.encode_text(tokens)
+                if isinstance(tokens, Mapping):
+                    text_features = self.model.encode_text(**tokens)
+                else:
+                    text_features = self.model.encode_text(tokens)
             else:
-                kwargs = {"text": tokens}
+                kwargs = tokens if isinstance(tokens, Mapping) else {"text": tokens}
                 outputs = self._run_model(**kwargs)
                 if isinstance(outputs, (tuple, list)) and len(outputs) >= 2:
                     text_features = outputs[1]
@@ -657,7 +756,8 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
                 "musk_checkpoint": args.checkpoint,
                 "precision": args.precision,
                 "ms_augment": args.ms_augment,
-                "text_tokenizer": getattr(backbone, "tokenizer_name", args.text_tokenizer),
+                "text_tokenizer": getattr(backbone, "tokenizer_name", None) or args.text_tokenizer,
+                "text_tokenizer_resolved": getattr(backbone, "tokenizer_name", None),
                 "image_size": args.image_size,
             }
         )

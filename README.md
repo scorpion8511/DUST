@@ -151,9 +151,11 @@ Pass `--hf-token` to authenticate against the gated Hugging Face repository (the
 script calls `huggingface_hub.login` for you) or leave it unset after running
 `huggingface-cli login` manually. When the MUSK code lives outside the Python
 path, point `--musk-repo` at a local clone to mirror `sys.path` setup from the
-demo notebook. The text branch defaults to the tokenizer advertised by the
-model; override it with `--text-tokenizer` if you need a specific `open_clip`
-tokeniser or want to cap the context length via `--text-max-length`.
+demo notebook. If the clone exposes `models/tokenizer.spm` the extractor wraps
+the official XLM-R SentencePiece tokenizer via `musk.utils.xlm_tokenizer`,
+matching the snippet from `demo.ipynb`. Provide `--text-tokenizer` to point at a
+custom `.spm` file or fall back to an `open_clip` vocabulary; combine it with
+`--text-max-length` to truncate captions as needed.
 
 Embeddings are L2-normalised by default, and repeated captions for the same
 region are averaged while retaining every unique description inside the exported
