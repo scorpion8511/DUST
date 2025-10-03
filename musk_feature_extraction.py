@@ -114,8 +114,10 @@ class MUSKBackbone:
         strict_checkpoint_key: str = "model|module",
         text_max_length: Optional[int] = None,
     ) -> None:
+        repo_root_abs: Optional[str] = None
         if musk_repo_root:
-            sys.path.insert(0, os.path.abspath(musk_repo_root))
+            repo_root_abs = os.path.abspath(musk_repo_root)
+            sys.path.insert(0, repo_root_abs)
 
         self._ensure_fairscale_stub()
 
@@ -164,7 +166,7 @@ class MUSKBackbone:
         self.ms_augment = ms_augment
         self.target_dtype = target_dtype
         self.text_max_length = text_max_length
-        self.musk_repo_root = musk_repo_root
+        self.musk_repo_root = repo_root_abs
 
         self.model = timm.models.create_model(model_name, pretrained=False)
         musk_utils.load_model_and_may_interpolate(
@@ -190,7 +192,17 @@ class MUSKBackbone:
             ]
         )
 
-        self.tokenizer, self.tokenizer_name = self._build_tokenizer(text_tokenizer)
+        tokenizer_hint = text_tokenizer
+        if tokenizer_hint is None and self.musk_repo_root is not None:
+            default_sentencepiece = os.path.join(self.musk_repo_root, "models", "tokenizer.spm")
+            if os.path.exists(default_sentencepiece):
+                tokenizer_hint = default_sentencepiece
+            else:
+                root_tokenizer = os.path.join(self.musk_repo_root, "tokenizer.spm")
+                if os.path.exists(root_tokenizer):
+                    tokenizer_hint = root_tokenizer
+
+        self.tokenizer, self.tokenizer_name = self._build_tokenizer(tokenizer_hint)
 
     def _infer_default_tokenizer_name(self) -> Optional[str]:
         cfg = getattr(self.model, "default_cfg", None)
@@ -280,6 +292,12 @@ class MUSKBackbone:
     ) -> Tuple[Optional[object], Optional[str], Optional[str]]:
         candidates = self._candidate_sentencepiece_paths(tokenizer_name)
         if not candidates:
+            if self.musk_repo_root:
+                return (
+                    None,
+                    tokenizer_name,
+                    f"no tokenizer.spm found under {self.musk_repo_root}; pass --text-tokenizer",
+                )
             return None, tokenizer_name, None
 
         try:
