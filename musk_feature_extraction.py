@@ -31,6 +31,7 @@ class _SentencePieceTokenizerWrapper:
         self._tokenizer = base_tokenizer
         self._musk_utils = musk_utils_module
         self._max_length = max_length
+        self.pad_token_id = getattr(base_tokenizer, "pad_token_id", None)
 
     def __call__(self, texts: Sequence[str]) -> Mapping[str, Tensor]:
         max_len = self._max_length or 1024
@@ -43,6 +44,9 @@ class _SentencePieceTokenizerWrapper:
             "text_description": torch.as_tensor(txt_ids, dtype=torch.long),
             "padding_mask": torch.as_tensor(padding, dtype=torch.bool),
         }
+
+    def __getattr__(self, name: str):  # pragma: no cover - passthrough
+        return getattr(self._tokenizer, name)
 
 try:  # pragma: no cover - optional dependency
     from huggingface_hub import login as hf_login
@@ -399,14 +403,55 @@ class MUSKBackbone:
         else:
             tensorised = torch.as_tensor(tokens)
 
-        if self.text_max_length is not None:
-            if isinstance(tensorised, Mapping):
-                for key, value in tensorised.items():
-                    tensorised[key] = value[..., : self.text_max_length]
-            else:
+        if isinstance(tensorised, Mapping):
+            tensorised = self._normalise_text_mapping(tensorised)
+        else:
+            if self.text_max_length is not None:
                 tensorised = tensorised[..., : self.text_max_length]
 
         return tensorised
+
+    def _normalise_text_mapping(self, tensorised: Mapping[str, Tensor]) -> Mapping[str, Tensor]:
+        text_key: Optional[str] = None
+        for candidate in ("text_description", "input_ids", "text"):
+            if candidate in tensorised:
+                text_key = candidate
+                break
+
+        tensorised = {key: value.clone() for key, value in tensorised.items()}
+
+        if self.text_max_length is not None:
+            for key, value in tensorised.items():
+                tensorised[key] = value[..., : self.text_max_length]
+
+        if text_key is None:
+            return tensorised
+
+        text_ids = tensorised[text_key]
+        padding_mask = tensorised.get("padding_mask")
+        padding_mask = self._ensure_padding_mask(text_ids, padding_mask)
+        tensorised["padding_mask"] = padding_mask
+        return tensorised
+
+    def _ensure_padding_mask(self, text_ids: Tensor, padding_mask: Optional[Tensor]) -> Tensor:
+        seq_len = text_ids.shape[-1]
+        mask = padding_mask
+        if mask is not None:
+            if mask.shape[-1] != seq_len:
+                if mask.shape[-1] < seq_len:
+                    pad_width = seq_len - mask.shape[-1]
+                    pad_shape = list(mask.shape)
+                    pad_shape[-1] = pad_width
+                    pad_values = torch.ones(*pad_shape, dtype=mask.dtype, device=mask.device)
+                    mask = torch.cat([mask, pad_values], dim=-1)
+                else:
+                    mask = mask[..., :seq_len]
+        if mask is None:
+            pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
+            if pad_token_id is None:
+                pad_token_id = 0
+            mask = text_ids.eq(pad_token_id)
+        return mask.to(dtype=torch.bool)
 
     def encode_text(self, texts: Sequence[str]) -> Tensor:
         tokens = self._prepare_text_inputs(texts)
