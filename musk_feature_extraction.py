@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import types
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence, Union
@@ -89,6 +90,8 @@ class MUSKBackbone:
     ) -> None:
         if musk_repo_root:
             sys.path.insert(0, os.path.abspath(musk_repo_root))
+
+        self._ensure_fairscale_stub()
 
         try:
             from musk import modeling as _musk_modeling  # type: ignore  # noqa: F401
@@ -204,6 +207,25 @@ class MUSKBackbone:
 
         self.tokenizer_name = tokenizer_name
         return tokeniser
+
+    def _ensure_fairscale_stub(self) -> None:
+        try:  # pragma: no cover - optional dependency
+            import fairscale.nn  # type: ignore  # noqa: F401
+            return
+        except ImportError:
+            pass
+
+        def _identity_wrapper(module, *args, **kwargs):
+            return module
+
+        fairscale_module = types.ModuleType("fairscale")
+        nn_module = types.ModuleType("fairscale.nn")
+        nn_module.checkpoint_wrapper = _identity_wrapper  # type: ignore[attr-defined]
+        nn_module.wrap = _identity_wrapper  # type: ignore[attr-defined]
+        fairscale_module.nn = nn_module  # type: ignore[attr-defined]
+
+        sys.modules.setdefault("fairscale", fairscale_module)
+        sys.modules.setdefault("fairscale.nn", nn_module)
 
     def _run_model(self, **kwargs):
         common_kwargs = dict(with_head=False, out_norm=False, return_global=True)
