@@ -40,9 +40,36 @@ class _SentencePieceTokenizerWrapper:
             self._tokenizer,
             max_len=max_len,
         )
+        text_tensor = torch.as_tensor(txt_ids, dtype=torch.long)
+        padding_tensor = torch.as_tensor(padding)
+
+        if padding_tensor.ndim == 1:
+            if padding_tensor.dtype == torch.bool:
+                padding_tensor = padding_tensor.unsqueeze(-1).expand_as(text_tensor)
+            else:
+                lengths = padding_tensor.to(torch.long)
+                steps = torch.arange(text_tensor.shape[-1], device=lengths.device)
+                padding_tensor = steps.unsqueeze(0) >= lengths.unsqueeze(-1)
+        elif padding_tensor.ndim == text_tensor.ndim:
+            if padding_tensor.shape != text_tensor.shape:
+                padding_tensor = padding_tensor[..., : text_tensor.shape[-1]]
+                if padding_tensor.shape != text_tensor.shape:
+                    pad_width = text_tensor.shape[-1] - padding_tensor.shape[-1]
+                    if pad_width > 0:
+                        pad_shape = list(padding_tensor.shape)
+                        pad_shape[-1] = pad_width
+                        pad_values = torch.ones(
+                            *pad_shape,
+                            dtype=padding_tensor.dtype,
+                            device=padding_tensor.device,
+                        )
+                        padding_tensor = torch.cat([padding_tensor, pad_values], dim=-1)
+        else:
+            padding_tensor = torch.zeros_like(text_tensor, dtype=torch.bool)
+
         return {
-            "text_description": torch.as_tensor(txt_ids, dtype=torch.long),
-            "padding_mask": torch.as_tensor(padding, dtype=torch.bool),
+            "text_description": text_tensor,
+            "padding_mask": padding_tensor.to(dtype=torch.bool),
         }
 
     def __getattr__(self, name: str):  # pragma: no cover - passthrough
