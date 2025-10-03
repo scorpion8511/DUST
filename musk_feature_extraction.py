@@ -31,7 +31,17 @@ class _SentencePieceTokenizerWrapper:
         self._tokenizer = base_tokenizer
         self._musk_utils = musk_utils_module
         self._max_length = max_length
-        self.pad_token_id = getattr(base_tokenizer, "pad_token_id", None)
+        pad_id = getattr(base_tokenizer, "pad_token_id", None)
+        if pad_id is None:
+            pad_token = getattr(base_tokenizer, "pad_token", None)
+            if pad_token is not None:
+                try:  # pragma: no cover - best effort fallback
+                    pad_id = base_tokenizer.convert_tokens_to_ids(pad_token)
+                except Exception:
+                    pad_id = None
+        if pad_id is None:
+            pad_id = 0
+        self.pad_token_id = int(pad_id)
 
     def __call__(self, texts: Sequence[str]) -> Mapping[str, Tensor]:
         max_len = self._max_length or 1024
@@ -43,33 +53,14 @@ class _SentencePieceTokenizerWrapper:
         text_tensor = torch.as_tensor(txt_ids, dtype=torch.long)
         padding_tensor = torch.as_tensor(padding)
 
-        if padding_tensor.ndim == 1:
-            if padding_tensor.dtype == torch.bool:
-                padding_tensor = padding_tensor.unsqueeze(-1).expand_as(text_tensor)
-            else:
-                lengths = padding_tensor.to(torch.long)
-                steps = torch.arange(text_tensor.shape[-1], device=lengths.device)
-                padding_tensor = steps.unsqueeze(0) >= lengths.unsqueeze(-1)
-        elif padding_tensor.ndim == text_tensor.ndim:
-            if padding_tensor.shape != text_tensor.shape:
-                padding_tensor = padding_tensor[..., : text_tensor.shape[-1]]
-                if padding_tensor.shape != text_tensor.shape:
-                    pad_width = text_tensor.shape[-1] - padding_tensor.shape[-1]
-                    if pad_width > 0:
-                        pad_shape = list(padding_tensor.shape)
-                        pad_shape[-1] = pad_width
-                        pad_values = torch.ones(
-                            *pad_shape,
-                            dtype=padding_tensor.dtype,
-                            device=padding_tensor.device,
-                        )
-                        padding_tensor = torch.cat([padding_tensor, pad_values], dim=-1)
-        else:
-            padding_tensor = torch.zeros_like(text_tensor, dtype=torch.bool)
+        pad_mask = text_tensor.eq(self.pad_token_id)
+        if pad_mask.shape != text_tensor.shape:
+            pad_mask = pad_mask.view(text_tensor.shape)
 
         return {
             "text_description": text_tensor,
-            "padding_mask": padding_tensor.to(dtype=torch.bool),
+            "padding_mask": pad_mask,
+            "_raw_padding": padding_tensor,
         }
 
     def __getattr__(self, name: str):  # pragma: no cover - passthrough
@@ -456,23 +447,45 @@ class MUSKBackbone:
 
         text_ids = tensorised[text_key]
         padding_mask = tensorised.get("padding_mask")
-        padding_mask = self._ensure_padding_mask(text_ids, padding_mask)
+        padding_mask = self._ensure_padding_mask(text_ids, padding_mask, tensorised)
         tensorised["padding_mask"] = padding_mask
+        tensorised.pop("_raw_padding", None)
         return tensorised
 
-    def _ensure_padding_mask(self, text_ids: Tensor, padding_mask: Optional[Tensor]) -> Tensor:
+    def _ensure_padding_mask(
+        self,
+        text_ids: Tensor,
+        padding_mask: Optional[Tensor],
+        token_mapping: Optional[Mapping[str, Tensor]] = None,
+    ) -> Tensor:
         seq_len = text_ids.shape[-1]
         mask = padding_mask
         if mask is not None:
-            if mask.shape[-1] != seq_len:
-                if mask.shape[-1] < seq_len:
-                    pad_width = seq_len - mask.shape[-1]
-                    pad_shape = list(mask.shape)
-                    pad_shape[-1] = pad_width
-                    pad_values = torch.ones(*pad_shape, dtype=mask.dtype, device=mask.device)
-                    mask = torch.cat([mask, pad_values], dim=-1)
-                else:
+            mask = mask.to(dtype=torch.bool) if mask.dtype == torch.bool else mask.clone()
+            if mask.ndim == text_ids.ndim - 1:
+                lengths = mask.to(torch.long)
+                if lengths.numel() == text_ids.shape[0]:
+                    steps = torch.arange(seq_len, device=lengths.device)
+                    mask = steps.unsqueeze(0) >= lengths.unsqueeze(-1)
+            if mask.ndim == text_ids.ndim:
+                if mask.shape != text_ids.shape:
                     mask = mask[..., :seq_len]
+                    if mask.shape != text_ids.shape:
+                        pad_width = seq_len - mask.shape[-1]
+                        if pad_width > 0:
+                            pad_shape = list(mask.shape)
+                            pad_shape[-1] = pad_width
+                            pad_values = torch.ones(*pad_shape, dtype=mask.dtype, device=mask.device)
+                            mask = torch.cat([mask, pad_values], dim=-1)
+            if mask.dtype != torch.bool:
+                unique_vals = mask.unique()
+                if unique_vals.numel() <= 2 and float(unique_vals.max()) <= 1 and float(unique_vals.min()) >= 0:
+                    mask = mask <= 0
+                else:
+                    pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
+                    if pad_token_id is None:
+                        pad_token_id = 0
+                    mask = text_ids.eq(int(pad_token_id))
         if mask is None:
             pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
             if pad_token_id is None:
