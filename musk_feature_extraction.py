@@ -31,6 +31,8 @@ class _SentencePieceTokenizerWrapper:
         self._tokenizer = base_tokenizer
         self._musk_utils = musk_utils_module
         self._max_length = max_length
+        # expose the underlying tokenizer so MUSK utilities can reuse it
+        self.base_tokenizer = base_tokenizer
 
         pad_id = getattr(base_tokenizer, "pad_token_id", None)
         if pad_id is None:
@@ -465,6 +467,35 @@ class MUSKBackbone:
 
     def _prepare_text_inputs(self, texts: Sequence[str]) -> Union[Tensor, Mapping[str, Tensor]]:
         tokenizer = self.tokenizer
+
+        if hasattr(self.musk_utils, "xlm_tokenizer"):
+            base_tokenizer = getattr(tokenizer, "base_tokenizer", tokenizer)
+            max_len = self.text_max_length
+            kwargs = {}
+            if max_len is not None:
+                kwargs["max_len"] = int(max_len)
+            try:
+                text_ids, padding_mask = self.musk_utils.xlm_tokenizer(
+                    list(texts), base_tokenizer, **kwargs
+                )
+            except TypeError:
+                text_ids, padding_mask = self.musk_utils.xlm_tokenizer(
+                    list(texts), base_tokenizer, max_len
+                )
+
+            text_tensor = torch.as_tensor(text_ids, dtype=torch.long)
+            pad_tensor = torch.as_tensor(padding_mask)
+            if pad_tensor.dtype != torch.bool:
+                pad_tensor = pad_tensor.to(dtype=torch.bool)
+            if pad_tensor.ndim == 0:
+                pad_tensor = pad_tensor.unsqueeze(0)
+            if pad_tensor.shape != text_tensor.shape:
+                try:
+                    pad_tensor = pad_tensor.view_as(text_tensor)
+                except RuntimeError:
+                    pad_tensor = pad_tensor.expand_as(text_tensor)
+            return {"text_description": text_tensor, "padding_mask": pad_tensor}
+
         tokens = tokenizer(texts)
         if isinstance(tokens, Mapping):
             tensorised = {key: torch.as_tensor(value) for key, value in tokens.items()}
