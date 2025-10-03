@@ -225,7 +225,17 @@ class MUSKBackbone:
         self.model.eval()
 
         if self.text_max_length is None:
-            self.text_max_length = self._infer_model_text_length() or 1024
+            inferred_length = self._infer_model_text_length()
+            if inferred_length is None:
+                inferred_length = 1024
+            # Some checkpoints report very small default context windows (for
+            # instance 16 or 100) even though the positional embeddings expect
+            # much longer sequences (typically 1024).  When that happens the
+            # model will crash once the padding mask is broadcast inside the
+            # attention blocks.  Guard against those misreports by clamping to
+            # the true positional embedding length when available and otherwise
+            # falling back to a conservative default of 1024 tokens.
+            self.text_max_length = max(int(inferred_length), 1024)
 
         interpolation_attr = getattr(T, "InterpolationMode", None)
         if interpolation_attr is not None:
@@ -274,6 +284,22 @@ class MUSKBackbone:
             value = getattr(self.model, key, None)
             if isinstance(value, int) and value > 0:
                 return value
+
+        beit3 = getattr(self.model, "beit3", None)
+        if beit3 is not None:
+            encoder = getattr(beit3, "encoder", None)
+            embed_positions = getattr(encoder, "embed_positions", None)
+            if embed_positions is not None:
+                for attr in ("num_embeddings", "weight", "pe", "embeddings"):
+                    candidate = getattr(embed_positions, attr, None)
+                    if isinstance(candidate, torch.Tensor) and candidate.ndim >= 1:
+                        return int(candidate.shape[0])
+                    if isinstance(candidate, int) and candidate > 0:
+                        return int(candidate)
+                if hasattr(embed_positions, "weight"):
+                    weight = getattr(embed_positions, "weight")
+                    if isinstance(weight, torch.Tensor) and weight.ndim >= 1:
+                        return int(weight.shape[0])
 
         cfg = getattr(self.model, "default_cfg", None)
         if isinstance(cfg, Mapping):
