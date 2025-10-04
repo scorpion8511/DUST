@@ -448,6 +448,12 @@ class MUSKBackbone:
         except TypeError:
             return self.model(**kwargs)
 
+    @staticmethod
+    def _ensure_2d_tensor(tensor: Tensor) -> Tensor:
+        if tensor.ndim == 1:
+            return tensor.unsqueeze(0)
+        return tensor
+
     def encode_images(self, images: Sequence[object]) -> Tensor:
         tensors = [self.transform(image).to(self.target_dtype) for image in images]
         batch = torch.stack(tensors, dim=0).to(self.device)
@@ -465,97 +471,64 @@ class MUSKBackbone:
 
         return image_features.detach().to("cpu", dtype=torch.float32)
 
-    def _prepare_text_inputs(self, texts: Sequence[str]) -> Union[Tensor, Mapping[str, Tensor]]:
+    def _prepare_text_inputs(self, texts: Sequence[str]) -> Mapping[str, Tensor]:
         tokenizer = self.tokenizer
-
-        if hasattr(self.musk_utils, "xlm_tokenizer"):
-            base_tokenizer = getattr(tokenizer, "base_tokenizer", tokenizer)
-            max_len = self.text_max_length
-            kwargs = {}
-            if max_len is not None:
-                kwargs["max_len"] = int(max_len)
-            try:
-                text_ids, pad_mask = self.musk_utils.xlm_tokenizer(
-                    list(texts), base_tokenizer, **kwargs
-                )
-            except TypeError:
-                text_ids, pad_mask = self.musk_utils.xlm_tokenizer(
-                    list(texts), base_tokenizer, max_len
-                )
-
-            text_tensor = torch.as_tensor(text_ids, dtype=torch.long)
-            if text_tensor.ndim == 1:
-                text_tensor = text_tensor.unsqueeze(0)
-
-            pad_tensor: Optional[Tensor] = None
-            if pad_mask is not None:
-                pad_tensor = torch.as_tensor(pad_mask)
-                if pad_tensor.dtype != torch.bool:
-                    pad_tensor = pad_tensor.ne(0)
-
-                if pad_tensor.ndim == 1 and text_tensor.ndim == 2:
-                    pad_tensor = pad_tensor.unsqueeze(0)
-                if pad_tensor.ndim == 1:
-                    pad_tensor = pad_tensor.unsqueeze(-1).expand_as(text_tensor)
-                elif pad_tensor.shape != text_tensor.shape:
-                    pad_tensor = pad_tensor[..., : text_tensor.shape[-1]]
-                    if pad_tensor.shape != text_tensor.shape:
-                        pad_tensor = pad_tensor.expand_as(text_tensor)
-
-            if self.text_max_length is not None and self.text_max_length > 0:
-                text_tensor = text_tensor[..., : self.text_max_length]
-                if pad_tensor is not None:
-                    pad_tensor = pad_tensor[..., : self.text_max_length]
-
-            if pad_tensor is None:
-                pad_id = getattr(base_tokenizer, "pad_token_id", None)
-                if pad_id is None:
-                    pad_id = getattr(tokenizer, "pad_token_id", 0)
-                pad_tensor = text_tensor.eq(int(pad_id))
-            return {"text_description": text_tensor, "padding_mask": pad_tensor}
-
         tokens = tokenizer(texts)
+
+        pad_id = getattr(getattr(tokenizer, "base_tokenizer", tokenizer), "pad_token_id", None)
+        if pad_id is None:
+            pad_id = getattr(tokenizer, "pad_token_id", 0)
+        pad_id = int(pad_id)
+
+        attention_mask_tensor: Optional[Tensor] = None
+
         if isinstance(tokens, Mapping):
-            tensorised = {key: torch.as_tensor(value) for key, value in tokens.items()}
+            mapping: Dict[str, Tensor] = {key: torch.as_tensor(value) for key, value in tokens.items()}
+            text_tensor: Optional[Tensor] = None
+            for candidate in ("text_description", "input_ids", "text"):
+                if candidate in mapping:
+                    text_tensor = mapping[candidate]
+                    if candidate != "text_description":
+                        mapping.pop(candidate)
+                    break
+            if text_tensor is None:
+                raise ValueError("Tokenizer output missing token ids; provide a MUSK-compatible tokenizer.")
+            text_tensor = torch.as_tensor(text_tensor, dtype=torch.long)
+            text_tensor = self._ensure_2d_tensor(text_tensor)
+            if self.text_max_length is not None and self.text_max_length > 0:
+                limit = int(self.text_max_length)
+                text_tensor = text_tensor[..., :limit]
+            attention_mask_tensor = mapping.get("attention_mask")
+            if attention_mask_tensor is not None:
+                attention_mask_tensor = self._ensure_2d_tensor(torch.as_tensor(attention_mask_tensor))
+                if self.text_max_length is not None and self.text_max_length > 0:
+                    attention_mask_tensor = attention_mask_tensor[..., : text_tensor.shape[-1]]
+                mapping["attention_mask"] = attention_mask_tensor
+            else:
+                mapping.pop("attention_mask", None)
+            padding_mask = text_tensor.eq(pad_id)
+            result = {
+                "text_description": text_tensor,
+                "padding_mask": padding_mask,
+            }
+            if attention_mask_tensor is not None:
+                result["attention_mask"] = attention_mask_tensor
+            return result
+
+        if isinstance(tokens, (tuple, list)) and len(tokens) >= 1:
+            text_tensor = torch.as_tensor(tokens[0], dtype=torch.long)
         else:
-            tensorised = torch.as_tensor(tokens)
+            text_tensor = torch.as_tensor(tokens, dtype=torch.long)
 
-        if isinstance(tensorised, Mapping):
-            tensorised = self._normalise_text_mapping(tensorised)
-        else:
-            if self.text_max_length is not None:
-                tensorised = tensorised[..., : self.text_max_length]
-
-        return tensorised
-
-    def _normalise_text_mapping(self, tensorised: Mapping[str, Tensor]) -> Mapping[str, Tensor]:
-        text_key: Optional[str] = None
-        for candidate in ("text_description", "input_ids", "text"):
-            if candidate in tensorised:
-                text_key = candidate
-                break
-
-        tensorised = {key: value.clone() for key, value in tensorised.items()}
-
-        if self.text_max_length is not None:
-            for key, value in tensorised.items():
-                tensorised[key] = value[..., : self.text_max_length]
-
-        if text_key is None:
-            return tensorised
-
-        text_ids = tensorised[text_key]
-        attention_mask = tensorised.get("attention_mask")
-        if attention_mask is not None:
-            padding_mask = (~attention_mask.to(dtype=torch.bool)).clone()
-            tensorised["padding_mask"] = padding_mask
-        else:
-            pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
-            if pad_token_id is None:
-                pad_token_id = 0
-            tensorised["padding_mask"] = text_ids.eq(int(pad_token_id))
-        tensorised.pop("attention_mask", None)
-        return tensorised
+        text_tensor = self._ensure_2d_tensor(text_tensor)
+        if self.text_max_length is not None and self.text_max_length > 0:
+            limit = int(self.text_max_length)
+            text_tensor = text_tensor[..., :limit]
+        padding_mask = text_tensor.eq(pad_id)
+        return {
+            "text_description": text_tensor,
+            "padding_mask": padding_mask,
+        }
 
     def encode_text(self, texts: Sequence[str]) -> Tensor:
         tokens = self._prepare_text_inputs(texts)
