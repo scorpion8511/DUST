@@ -166,6 +166,7 @@ class MUSKEncoder:
         _ensure_fairscale_stub()
 
         try:
+            from musk import modeling as _musk_modeling  # type: ignore  # noqa: F401
             from musk import utils  # type: ignore
         except ImportError as exc:  # pragma: no cover - runtime feedback
             raise ImportError(
