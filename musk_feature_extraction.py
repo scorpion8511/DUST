@@ -498,21 +498,11 @@ class MUSKBackbone:
             if self.text_max_length is not None and self.text_max_length > 0:
                 limit = int(self.text_max_length)
                 text_tensor = text_tensor[..., :limit]
-            attention_mask_tensor = mapping.get("attention_mask")
-            if attention_mask_tensor is not None:
-                attention_mask_tensor = self._ensure_2d_tensor(torch.as_tensor(attention_mask_tensor))
-                if self.text_max_length is not None and self.text_max_length > 0:
-                    attention_mask_tensor = attention_mask_tensor[..., : text_tensor.shape[-1]]
-                mapping["attention_mask"] = attention_mask_tensor
-            else:
-                mapping.pop("attention_mask", None)
             padding_mask = text_tensor.eq(pad_id)
             result = {
                 "text_description": text_tensor,
                 "padding_mask": padding_mask,
             }
-            if attention_mask_tensor is not None:
-                result["attention_mask"] = attention_mask_tensor
             return result
 
         if isinstance(tokens, (tuple, list)) and len(tokens) >= 1:
