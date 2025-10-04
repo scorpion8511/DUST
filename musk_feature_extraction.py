@@ -475,22 +475,38 @@ class MUSKBackbone:
             if max_len is not None:
                 kwargs["max_len"] = int(max_len)
             try:
-                text_ids, _ = self.musk_utils.xlm_tokenizer(
+                text_ids, pad_mask = self.musk_utils.xlm_tokenizer(
                     list(texts), base_tokenizer, **kwargs
                 )
             except TypeError:
-                text_ids, _ = self.musk_utils.xlm_tokenizer(
+                text_ids, pad_mask = self.musk_utils.xlm_tokenizer(
                     list(texts), base_tokenizer, max_len
                 )
 
             text_tensor = torch.as_tensor(text_ids, dtype=torch.long)
+            pad_tensor: Optional[Tensor] = None
+            if pad_mask is not None:
+                pad_tensor = torch.as_tensor(pad_mask)
+                if pad_tensor.dtype != torch.bool:
+                    pad_tensor = pad_tensor.ne(0)
+
+                if pad_tensor.ndim == 1:
+                    pad_tensor = pad_tensor.unsqueeze(-1).expand_as(text_tensor)
+                elif pad_tensor.shape != text_tensor.shape:
+                    pad_tensor = pad_tensor[..., : text_tensor.shape[-1]]
+                    if pad_tensor.shape != text_tensor.shape:
+                        pad_tensor = pad_tensor.expand_as(text_tensor)
+
             if self.text_max_length is not None and self.text_max_length > 0:
                 text_tensor = text_tensor[..., : self.text_max_length]
+                if pad_tensor is not None:
+                    pad_tensor = pad_tensor[..., : self.text_max_length]
 
-            pad_id = getattr(base_tokenizer, "pad_token_id", None)
-            if pad_id is None:
-                pad_id = getattr(tokenizer, "pad_token_id", 0)
-            pad_tensor = text_tensor.eq(int(pad_id))
+            if pad_tensor is None:
+                pad_id = getattr(base_tokenizer, "pad_token_id", None)
+                if pad_id is None:
+                    pad_id = getattr(tokenizer, "pad_token_id", 0)
+                pad_tensor = text_tensor.eq(int(pad_id))
             return {"text_description": text_tensor, "padding_mask": pad_tensor}
 
         tokens = tokenizer(texts)
