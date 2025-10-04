@@ -250,6 +250,8 @@ class MUSKBackbone:
         self.model.to(device=self.device, dtype=self.target_dtype)
         self.model.eval()
 
+        self.text_vocab_size = self._infer_text_vocab_size()
+
         if self.text_max_length is None:
             inferred_length = self._infer_model_text_length()
             if inferred_length is None:
@@ -375,6 +377,48 @@ class MUSKBackbone:
             raise RuntimeError(error_message)
 
         return tokeniser, resolved_name
+
+    def _infer_text_vocab_size(self) -> Optional[int]:
+        """Best-effort detection of the checkpoint's text vocabulary size."""
+
+        vocab_candidates: List[int] = []
+
+        for attr in ("text_vocab_size", "vocab_size", "text_dict_size"):
+            value = getattr(self.model, attr, None)
+            if isinstance(value, int) and value > 0:
+                vocab_candidates.append(int(value))
+
+        beit3 = getattr(self.model, "beit3", None)
+        if beit3 is not None:
+            encoder = getattr(beit3, "encoder", None)
+            if encoder is not None:
+                for name in ("embed_tokens", "tok_embeddings", "word_embedding"):
+                    layer = getattr(encoder, name, None)
+                    if layer is not None:
+                        weight = getattr(layer, "weight", None)
+                        if isinstance(weight, torch.Tensor) and weight.ndim >= 2:
+                            vocab_candidates.append(int(weight.shape[0]))
+
+        if vocab_candidates:
+            # prefer the largest candidate in case wrapper attributes under-report
+            return max(vocab_candidates)
+
+        return None
+
+    def _sanitize_token_ids(self, token_ids: Tensor, pad_id: int) -> Tensor:
+        """Clamp invalid token ids to the pad id to avoid embedding overflows."""
+
+        if self.text_vocab_size is None:
+            return token_ids
+
+        vocab_size = int(self.text_vocab_size)
+        if vocab_size <= 0:
+            return token_ids
+
+        token_ids = token_ids.clone()
+        token_ids[token_ids < 0] = pad_id
+        token_ids[token_ids >= vocab_size] = pad_id
+        return token_ids
 
     def _candidate_sentencepiece_paths(self, hint: Optional[str]) -> List[str]:
         candidates: List[str] = []
@@ -525,6 +569,7 @@ class MUSKBackbone:
             if self.text_max_length is not None and self.text_max_length > 0:
                 limit = int(self.text_max_length)
                 text_tensor = text_tensor[..., :limit]
+            text_tensor = self._sanitize_token_ids(text_tensor, pad_id)
             padding_mask = mapping.get("padding_mask")
             if padding_mask is not None:
                 padding_mask = torch.as_tensor(padding_mask, dtype=torch.bool)
@@ -532,6 +577,7 @@ class MUSKBackbone:
                 if self.text_max_length is not None and self.text_max_length > 0:
                     limit = int(self.text_max_length)
                     padding_mask = padding_mask[..., :limit]
+                padding_mask = padding_mask | text_tensor.eq(pad_id)
             else:
                 padding_mask = text_tensor.eq(pad_id)
             result = {
@@ -549,6 +595,7 @@ class MUSKBackbone:
         if self.text_max_length is not None and self.text_max_length > 0:
             limit = int(self.text_max_length)
             text_tensor = text_tensor[..., :limit]
+        text_tensor = self._sanitize_token_ids(text_tensor, pad_id)
         padding_mask = text_tensor.eq(pad_id)
         return {
             "text_description": text_tensor,
