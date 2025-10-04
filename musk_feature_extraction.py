@@ -484,12 +484,17 @@ class MUSKBackbone:
                 )
 
             text_tensor = torch.as_tensor(text_ids, dtype=torch.long)
+            if text_tensor.ndim == 1:
+                text_tensor = text_tensor.unsqueeze(0)
+
             pad_tensor: Optional[Tensor] = None
             if pad_mask is not None:
                 pad_tensor = torch.as_tensor(pad_mask)
                 if pad_tensor.dtype != torch.bool:
                     pad_tensor = pad_tensor.ne(0)
 
+                if pad_tensor.ndim == 1 and text_tensor.ndim == 2:
+                    pad_tensor = pad_tensor.unsqueeze(0)
                 if pad_tensor.ndim == 1:
                     pad_tensor = pad_tensor.unsqueeze(-1).expand_as(text_tensor)
                 elif pad_tensor.shape != text_tensor.shape:
