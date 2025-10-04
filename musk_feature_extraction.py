@@ -66,6 +66,30 @@ class _SentencePieceTokenizerWrapper:
 
     def __call__(self, texts: Sequence[str]) -> Mapping[str, Tensor]:
         max_len = self._resolve_max_length()
+
+        if hasattr(self._musk_utils, "xlm_tokenizer"):
+            tokens, padding_mask = self._musk_utils.xlm_tokenizer(  # type: ignore[attr-defined]
+                list(texts),
+                getattr(self, "base_tokenizer", self._tokenizer),
+                max_len=max_len,
+            )
+
+            text_tensor = torch.as_tensor(tokens, dtype=torch.long)
+            pad_tensor = torch.as_tensor(padding_mask)
+            if pad_tensor.dtype != torch.bool:
+                pad_tensor = pad_tensor != 0
+            pad_tensor = pad_tensor.to(dtype=torch.bool)
+
+            if text_tensor.ndim == 1:
+                text_tensor = text_tensor.unsqueeze(0)
+            if pad_tensor.ndim == 1:
+                pad_tensor = pad_tensor.unsqueeze(0)
+
+            return {
+                "text_description": text_tensor,
+                "padding_mask": pad_tensor,
+            }
+
         encoded = self._tokenizer(
             list(texts),
             padding="max_length",
