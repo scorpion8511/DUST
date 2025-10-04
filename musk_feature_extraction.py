@@ -483,7 +483,10 @@ class MUSKBackbone:
         attention_mask_tensor: Optional[Tensor] = None
 
         if isinstance(tokens, Mapping):
-            mapping: Dict[str, Tensor] = {key: torch.as_tensor(value) for key, value in tokens.items()}
+            mapping: Dict[str, Tensor] = {
+                key: torch.as_tensor(value)
+                for key, value in tokens.items()
+            }
             text_tensor: Optional[Tensor] = None
             for candidate in ("text_description", "input_ids", "text"):
                 if candidate in mapping:
@@ -498,7 +501,15 @@ class MUSKBackbone:
             if self.text_max_length is not None and self.text_max_length > 0:
                 limit = int(self.text_max_length)
                 text_tensor = text_tensor[..., :limit]
-            padding_mask = text_tensor.eq(pad_id)
+            padding_mask = mapping.get("padding_mask")
+            if padding_mask is not None:
+                padding_mask = torch.as_tensor(padding_mask, dtype=torch.bool)
+                padding_mask = self._ensure_2d_tensor(padding_mask)
+                if self.text_max_length is not None and self.text_max_length > 0:
+                    limit = int(self.text_max_length)
+                    padding_mask = padding_mask[..., :limit]
+            else:
+                padding_mask = text_tensor.eq(pad_id)
             result = {
                 "text_description": text_tensor,
                 "padding_mask": padding_mask,
