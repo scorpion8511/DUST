@@ -159,6 +159,29 @@ custom `.spm` file or fall back to an `open_clip` vocabulary; combine it with
 derives the model's text context length (1024 tokens for the released MUSK
 checkpoints) so the positional embeddings match the repository implementation.
 
+## Multimodal fine-tuning for classification
+
+`multimodal_finetune.py` offers a lightweight way to benchmark simple
+classification accuracy from the paired image/text datasets already used for
+feature extraction. It accepts the same manifest structure as the extraction
+scripts (image paths, text descriptions, optional filtering) along with a class
+label column. The script splits the manifest into train/validation/test splits,
+encodes each sample with either PLIP or MUSK, concatenates the resulting
+embeddings, and trains a linear classifier.
+
+```bash
+python multimodal_finetune.py manifest.csv \
+    --model plip \
+    --image-root /home/jovyan/work/tran_est/multires_VL/output \
+    --image-column patch_path --text-column generated_text \
+    --label-column diagnosis --filter-column split --filter-values train val test
+```
+
+Switch `--model musk` to fine-tune on MUSK embeddings. When using MUSK, provide
+`--text-tokenizer` or point `--musk-repo` at a local clone containing
+`tokenizer.spm`, and pass `--hf-token` if the checkpoint is gated on Hugging
+Face. Validation and test accuracies are printed at the end of the run.
+
 Embeddings are L2-normalised by default, and repeated captions for the same
 region are averaged while retaining every unique description inside the exported
 metadata. Additional flags mirror the other extractors: `--filter-column`,
