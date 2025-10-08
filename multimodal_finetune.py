@@ -147,6 +147,7 @@ class MUSKEncoder:
             if musk_repo not in sys.path:
                 sys.path.insert(0, musk_repo)
         from musk import utils  # type: ignore
+        from musk import modeling as _musk_modeling  # type: ignore  # noqa: F401
         from timm.models import create_model
         import torchvision.transforms as T
         from timm.data.constants import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
@@ -216,6 +217,14 @@ def resolve_tokenizer_path(musk_repo: Optional[str]) -> str:
             os.path.join(musk_repo, "tokenizer.spm"),
             os.path.join(musk_repo, "models", "tokenizer.spm"),
         ]
+        parent = os.path.dirname(musk_repo)
+        if parent and parent not in ("", musk_repo):
+            candidates.extend(
+                [
+                    os.path.join(parent, "tokenizer.spm"),
+                    os.path.join(parent, "models", "tokenizer.spm"),
+                ]
+            )
         for candidate in candidates:
             if os.path.exists(candidate):
                 return candidate
