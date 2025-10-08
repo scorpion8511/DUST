@@ -163,11 +163,18 @@ checkpoints) so the positional embeddings match the repository implementation.
 
 `multimodal_finetune.py` offers a lightweight way to benchmark simple
 classification accuracy from the paired image/text datasets already used for
-feature extraction. It accepts the same manifest structure as the extraction
-scripts (image paths, text descriptions, optional filtering) along with a class
-label column. The script splits the manifest into train/validation/test splits,
-encodes each sample with either PLIP or MUSK, concatenates the resulting
-embeddings, and trains a linear classifier.
+feature extraction. Unlike the scoring utilities, which only need image–text
+pairs, the fine-tuning script **requires** a class label for every row. Think of
+the manifest as a standard supervised dataset where each image and its caption
+are paired with a ground-truth class (e.g., diagnosis, tissue type). The CSV
+must therefore include an explicit label column in addition to the image and
+text fields.
+
+The script accepts the same manifest structure as the extraction utilities
+(image paths, text descriptions, optional filtering) along with a class label
+column. It splits the manifest into train/validation/test subsets, encodes each
+sample with either PLIP or MUSK, concatenates the resulting embeddings, and
+trains a linear classifier.
 
 ```bash
 python multimodal_finetune.py manifest.csv \
