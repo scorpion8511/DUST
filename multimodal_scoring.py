@@ -41,6 +41,8 @@ class MSCIResult:
     """Container describing the MSCI metric."""
 
     msci: float
+    mean_variance: float
+    max_variance: float
     per_region_variance: torch.Tensor
     similarities: torch.Tensor
     magnifications: Sequence[int]
@@ -48,6 +50,8 @@ class MSCIResult:
     def to_dict(self) -> Dict[str, object]:
         return {
             "msci": float(self.msci),
+            "mean_variance": float(self.mean_variance),
+            "max_variance": float(self.max_variance),
             "per_region_variance": self.per_region_variance.tolist(),
             "magnifications": list(self.magnifications),
         }
@@ -109,6 +113,27 @@ def load_multimodal_embeddings(
     return images, texts
 
 
+def _max_variance(num_magnifications: int) -> float:
+    """Return the theoretical maximum variance for similarities in [-1, 1]."""
+
+    if num_magnifications <= 0:
+        raise ValueError("num_magnifications must be positive.")
+
+    # The maximum variance occurs when the similarities are split between the
+    # extreme values -1 and +1. Iterate over all possible splits to find the
+    # tightest upper bound for the provided number of magnifications.
+    max_var = 0.0
+    n = float(num_magnifications)
+    for k in range(num_magnifications + 1):
+        mean = (2.0 * k - n) / n
+        diff_pos = 1.0 - mean
+        diff_neg = -1.0 - mean
+        var = (k * diff_pos * diff_pos + (num_magnifications - k) * diff_neg * diff_neg) / n
+        if var > max_var:
+            max_var = var
+    return max_var
+
+
 def compute_msci(
     image_embeddings: Mapping[int, torch.Tensor],
     text_embeddings: torch.Tensor,
@@ -147,8 +172,23 @@ def compute_msci(
     sim_tensor = torch.stack(similarities, dim=-1)
     mean_sim = sim_tensor.mean(dim=-1, keepdim=True)
     variance = torch.mean((sim_tensor - mean_sim) ** 2, dim=-1)
-    msci = 1.0 - variance.mean().item()
-    return MSCIResult(msci=msci, per_region_variance=variance, similarities=sim_tensor, magnifications=mags)
+    mean_variance = variance.mean().item()
+
+    max_var = _max_variance(len(mags))
+    if max_var <= 0:
+        msci_score = 0.0
+    else:
+        msci_score = 1.0 - (mean_variance / max_var)
+        msci_score = float(max(0.0, min(1.0, msci_score)))
+
+    return MSCIResult(
+        msci=msci_score,
+        mean_variance=mean_variance,
+        max_variance=max_var,
+        per_region_variance=variance,
+        similarities=sim_tensor,
+        magnifications=mags,
+    )
 
 
 def _validate_embeddings(
@@ -302,7 +342,8 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
         cmi_avg = float(sum(r.cmi_lb for r in cmi_results.values()) / len(cmi_results))
 
         print("--- MSCI ---")
-        print(f"MSCI score: {msci_result.msci:.6f}")
+        print(f"MSCI score: {msci_result.msci:.6f} (normalised by max variance {msci_result.max_variance:.6f})")
+        print(f"Mean variance: {msci_result.mean_variance:.6f}")
         print("Per-region variance (first 10 values):")
         preview = msci_result.per_region_variance[:10].cpu().numpy()
         print(preview)

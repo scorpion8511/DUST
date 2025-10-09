@@ -216,6 +216,12 @@ the symmetric InfoNCE objective unless a fixed value is supplied via
 `--temperature`. The search range can be customised with
 `--min-temperature`, `--max-temperature`, and `--temperature-steps`.
 
+For MSCI, the script now reports both the raw mean variance across
+magnifications and a normalised score scaled by the theoretical maximum
+variance for similarities in ``[-1, 1]``. This keeps the score within
+``[0, 1]`` while making it easier to interpret differences across
+models when the raw variances are very small.
+
 By default all magnifications present in each feature file are used.
 Setting `--magnifications` allows evaluation on a subset (shared across
 all inputs), while the `--json` flag stores the resulting metrics in a
