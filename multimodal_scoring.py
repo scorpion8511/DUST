@@ -27,7 +27,7 @@ import argparse
 import json
 import math
 from dataclasses import dataclass
-from typing import Dict, Iterable, Mapping, MutableMapping, Sequence
+from typing import Dict, Iterable, Mapping, MutableMapping, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -151,26 +151,84 @@ def compute_msci(
     return MSCIResult(msci=msci, per_region_variance=variance, similarities=sim_tensor, magnifications=mags)
 
 
-def compute_cmi_lb(
-    image_embeddings: torch.Tensor, text_embeddings: torch.Tensor, temperature: float
-) -> CMILBResult:
-    """Compute the CMI-LB metric for paired embeddings."""
-
+def _validate_embeddings(
+    image_embeddings: torch.Tensor, text_embeddings: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
     if image_embeddings.shape != text_embeddings.shape:
         raise ValueError(
             f"Image and text embeddings must have identical shapes, got {image_embeddings.shape} vs {text_embeddings.shape}."
         )
-
-    if temperature <= 0:
-        raise ValueError("Temperature must be positive for CMI-LB computation.")
+    if image_embeddings.ndim != 2:
+        raise ValueError(
+            f"Embeddings must be rank-2 tensors of shape [N, D], received shape {image_embeddings.shape}."
+        )
+    if image_embeddings.shape[0] == 0:
+        raise ValueError("At least one embedding pair is required to compute CMI-LB.")
 
     x = F.normalize(image_embeddings, dim=-1)
     y = F.normalize(text_embeddings, dim=-1)
+    return x, y
 
-    logits = torch.matmul(x, y.T) / temperature
+
+def _estimate_temperature(
+    similarities: torch.Tensor,
+    min_temperature: float,
+    max_temperature: float,
+    steps: int,
+) -> float:
+    """Search for the temperature that minimises the symmetric InfoNCE loss."""
+
+    if steps <= 0:
+        raise ValueError("Temperature search requires a positive number of steps.")
+    if not (min_temperature > 0 and max_temperature > 0):
+        raise ValueError("Temperature bounds must be strictly positive.")
+    if min_temperature >= max_temperature:
+        raise ValueError("min_temperature must be smaller than max_temperature.")
+
+    log_min = math.log10(min_temperature)
+    log_max = math.log10(max_temperature)
+    temperatures = torch.logspace(log_min, log_max, steps, device=similarities.device, dtype=similarities.dtype)
+
+    sims = similarities.unsqueeze(0) / temperatures.view(-1, 1, 1)
+
+    log_prob_x = sims.log_softmax(dim=-1)
+    log_prob_y = sims.transpose(-1, -2).log_softmax(dim=-1)
+
+    diag_x = torch.diagonal(log_prob_x, dim1=-2, dim2=-1)
+    diag_y = torch.diagonal(log_prob_y, dim1=-2, dim2=-1)
+
+    loss_x = -diag_x.mean(dim=-1)
+    loss_y = -diag_y.mean(dim=-1)
+    symmetric_loss = 0.5 * (loss_x + loss_y)
+
+    best_index = torch.argmin(symmetric_loss).item()
+    return float(temperatures[best_index].item())
+
+
+def compute_cmi_lb(
+    image_embeddings: torch.Tensor,
+    text_embeddings: torch.Tensor,
+    temperature: float | None,
+    *,
+    min_temperature: float,
+    max_temperature: float,
+    temperature_steps: int,
+) -> CMILBResult:
+    """Compute the CMI-LB metric for paired embeddings."""
+
+    x, y = _validate_embeddings(image_embeddings, text_embeddings)
+
+    similarities = torch.matmul(x, y.T)
+
+    if temperature is None:
+        temperature = _estimate_temperature(
+            similarities, min_temperature=min_temperature, max_temperature=max_temperature, steps=temperature_steps
+        )
+    elif temperature <= 0:
+        raise ValueError("Temperature must be positive for CMI-LB computation.")
+
+    logits = similarities / temperature
     n = logits.shape[0]
-    if n == 0:
-        raise ValueError("At least one embedding pair is required to compute CMI-LB.")
 
     labels = torch.arange(n, device=logits.device)
     log_prob_x = F.log_softmax(logits, dim=-1)
@@ -180,14 +238,18 @@ def compute_cmi_lb(
 
     log_n = math.log(n)
     cmi_lb = 0.5 * ((log_n - loss_x.item()) + (log_n - loss_y.item()))
-    return CMILBResult(temperature=temperature, loss_x=float(loss_x.item()), loss_y=float(loss_y.item()), cmi_lb=float(cmi_lb))
+    return CMILBResult(temperature=float(temperature), loss_x=float(loss_x.item()), loss_y=float(loss_y.item()), cmi_lb=float(cmi_lb))
 
 
 def compute_cmi_lb_across_magnifications(
     image_embeddings: Mapping[int, torch.Tensor],
     text_embeddings: torch.Tensor,
     magnifications: Iterable[int],
-    temperature: float,
+    temperature: float | None,
+    *,
+    min_temperature: float,
+    max_temperature: float,
+    temperature_steps: int,
 ) -> Dict[int, CMILBResult]:
     """Compute CMI-LB for each magnification individually."""
 
@@ -195,7 +257,14 @@ def compute_cmi_lb_across_magnifications(
     for mag in magnifications:
         if mag not in image_embeddings:
             raise KeyError(f"Missing embeddings for magnification {mag}.")
-        results[mag] = compute_cmi_lb(image_embeddings[mag], text_embeddings, temperature)
+        results[mag] = compute_cmi_lb(
+            image_embeddings[mag],
+            text_embeddings,
+            temperature,
+            min_temperature=min_temperature,
+            max_temperature=max_temperature,
+            temperature_steps=temperature_steps,
+        )
     return results
 
 
@@ -221,7 +290,13 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
         magnifications = args.magnifications or list(sorted(image_embeddings.keys()))
         msci_result = compute_msci(image_embeddings, text_embeddings, magnifications)
         cmi_results = compute_cmi_lb_across_magnifications(
-            image_embeddings, text_embeddings, magnifications, args.temperature
+            image_embeddings,
+            text_embeddings,
+            magnifications,
+            args.temperature,
+            min_temperature=args.min_temperature,
+            max_temperature=args.max_temperature,
+            temperature_steps=args.temperature_steps,
         )
 
         cmi_avg = float(sum(r.cmi_lb for r in cmi_results.values()) / len(cmi_results))
@@ -280,8 +355,26 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.07,
-        help="Softmax temperature used in the CMI-LB computation.",
+        default=None,
+        help="Fixed softmax temperature for CMI-LB. Leave unset to automatically search for an optimal value.",
+    )
+    parser.add_argument(
+        "--min-temperature",
+        type=float,
+        default=1e-3,
+        help="Lower bound of the temperature search interval when --temperature is unset.",
+    )
+    parser.add_argument(
+        "--max-temperature",
+        type=float,
+        default=1.0,
+        help="Upper bound of the temperature search interval when --temperature is unset.",
+    )
+    parser.add_argument(
+        "--temperature-steps",
+        type=int,
+        default=50,
+        help="Number of log-spaced evaluation points used during automatic temperature search.",
     )
     parser.add_argument(
         "--json",

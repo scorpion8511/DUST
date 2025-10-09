@@ -208,8 +208,13 @@ feature sets, run:
 
 ```bash
 python multimodal_scoring.py /path/to/plip_features.pth /path/to/musk_features.pth \
-    --device cuda:0 --temperature 0.07 --json multimodal_scores.json
+    --device cuda:0 --json multimodal_scores.json
 ```
+
+The scorer automatically searches for the temperature that maximises
+the symmetric InfoNCE objective unless a fixed value is supplied via
+`--temperature`. The search range can be customised with
+`--min-temperature`, `--max-temperature`, and `--temperature-steps`.
 
 By default all magnifications present in each feature file are used.
 Setting `--magnifications` allows evaluation on a subset (shared across
