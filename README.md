@@ -126,6 +126,31 @@ caption in the exported metadata. The resulting metadata dictionary captures the
 resolved region ids, original CSV identifiers, per-magnification patch geometry,
 and the PLIP model identifier for auditability.
 
+### CONCH feature extractor
+
+`conch_feature_extraction.py` provides the analogous workflow for CONCH
+checkpoints distributed with the open-source CONCH repository. The helper wraps
+`conch.open_clip_custom.create_model_from_pretrained`, applies the repository's
+pre-processing transform to each cropped patch, and exposes the same CSV schema
+and metadata as the TorchScript/PLIP/MUSK pipelines.
+
+```bash
+python conch_feature_extraction.py manifest.csv conch_features.pth \
+    --checkpoint ./checkpoints/CONCH/pytorch_model.bin \
+    --model-cfg conch_ViT-B-16 \
+    --image-root /home/jovyan/work/tran_est/multires_VL/output \
+    --image-column patch_path --text-column generated_text \
+    --magnification-column patch_scale --region-column patch_id \
+    --strip-region-suffix --metadata-json conch_metadata.json
+```
+
+The script instantiates the tokenizer via `conch.open_clip_custom.get_tokenizer`
+and reuses the official `tokenize` helper, ensuring captions are processed
+exactly as in CONCH's reference snippets. Embeddings are L2-normalised by
+default; pass `--no-normalize` to retain raw outputs. The exported metadata
+records the resolved region ids, unique captions per region, original CSV
+identifiers, and the model/checkpoint parameters used for provenance.
+
 ### MUSK timm extractor
 
 `musk_feature_extraction.py` now follows the official MUSK instructions: the
