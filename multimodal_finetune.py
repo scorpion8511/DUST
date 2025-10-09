@@ -1,4 +1,4 @@
-"""Train a simple classifier on PLIP or MUSK embeddings.
+"""Train a simple classifier on PLIP, MUSK, or CONCH embeddings.
 
 This script reads an image/text CSV manifest with class labels, encodes each
 pair using either the PLIP or MUSK encoders, and then trains a linear classifier
@@ -28,6 +28,20 @@ class Sample:
     image_path: str
     text: str
     label: int
+
+
+def _maybe_login(token: Optional[str]) -> None:
+    """Authenticate with Hugging Face if a token is provided."""
+
+    if not token:
+        return
+
+    try:  # pragma: no cover - side effect only used at runtime
+        from huggingface_hub import login
+
+        login(token, add_to_git_credential=False)
+    except Exception as exc:  # pragma: no cover - provide context to callers
+        raise RuntimeError("Failed to authenticate with Hugging Face.") from exc
 
 
 def read_manifest(
@@ -153,10 +167,7 @@ class MUSKEncoder:
         from timm.data.constants import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
         from transformers import XLMRobertaTokenizer
 
-        if hf_token:
-            from huggingface_hub import login
-
-            login(hf_token, add_to_git_credential=False)
+        _maybe_login(hf_token)
 
         self.device = torch.device(device)
         self.precision = torch.float16 if precision == "fp16" else torch.float32
@@ -209,6 +220,71 @@ class MUSKEncoder:
         return torch.cat(features, dim=0)
 
 
+class CONCHEncoder:
+    """Helper that wraps the CONCH open_clip encoder for feature extraction."""
+
+    def __init__(
+        self,
+        model_cfg: str,
+        checkpoint: str,
+        device: str,
+        precision: str,
+        hf_token: Optional[str],
+        force_img_size: Optional[int],
+    ) -> None:
+        _maybe_login(hf_token)
+
+        from PIL import Image  # noqa: F401  (ensure Pillow is available at runtime)
+        from conch.open_clip_custom import (
+            create_model_from_pretrained,
+            get_tokenizer,
+            tokenize,
+        )
+
+        extra_kwargs = {}
+        if force_img_size is not None:
+            extra_kwargs["force_img_size"] = int(force_img_size)
+
+        self.model, self.preprocess = create_model_from_pretrained(
+            model_cfg,
+            checkpoint,
+            **extra_kwargs,
+        )
+        self.tokenizer = get_tokenizer()
+        self.tokenize_fn = tokenize
+
+        self.device = torch.device(device)
+        self.dtype = torch.float16 if precision == "fp16" else torch.float32
+        self.model.to(self.device, dtype=self.dtype).eval()
+
+    def encode(self, samples: Sequence[Sample], batch_size: int, normalize: bool) -> torch.Tensor:
+        from PIL import Image
+
+        features: List[torch.Tensor] = []
+        for start in range(0, len(samples), batch_size):
+            chunk = samples[start : start + batch_size]
+            images = [self.preprocess(Image.open(s.image_path).convert("RGB")) for s in chunk]
+            texts = [s.text for s in chunk]
+
+            image_tensor = torch.stack(images).to(self.device, dtype=self.dtype)
+            text_tokens = self.tokenize_fn(texts=texts, tokenizer=self.tokenizer).to(self.device)
+
+            with torch.inference_mode():
+                image_embeddings = self.model.encode_image(image_tensor)
+                text_embeddings = self.model.encode_text(text_tokens)
+
+            if normalize:
+                image_embeddings = F.normalize(image_embeddings, dim=-1)
+                text_embeddings = F.normalize(text_embeddings, dim=-1)
+
+            combined = torch.cat(
+                [image_embeddings.float(), text_embeddings.float()], dim=-1
+            )
+            features.append(combined.cpu())
+
+        return torch.cat(features, dim=0)
+
+
 def resolve_tokenizer_path(musk_repo: Optional[str]) -> str:
     """Infer the MUSK tokenizer path from a local clone."""
 
@@ -243,6 +319,10 @@ def encode_features(
     hf_token: Optional[str],
     musk_repo: Optional[str],
     text_max_length: int,
+    conch_checkpoint: Optional[str],
+    conch_model_cfg: str,
+    conch_precision: str,
+    conch_force_img_size: Optional[int],
 ) -> torch.Tensor:
     if model_name == "plip":
         return encode_with_plip(samples, "vinid/plip", batch_size, normalize, device)
@@ -260,6 +340,18 @@ def encode_features(
             text_max_length=text_max_length,
         )
         return encoder.encode(samples, batch_size)
+    if model_name == "conch":
+        if not conch_checkpoint:
+            raise ValueError("--conch-checkpoint is required when --model conch is selected")
+        encoder = CONCHEncoder(
+            model_cfg=conch_model_cfg,
+            checkpoint=conch_checkpoint,
+            device=device,
+            precision=conch_precision,
+            hf_token=hf_token,
+            force_img_size=conch_force_img_size,
+        )
+        return encoder.encode(samples, batch_size, normalize)
     raise ValueError(f"Unsupported model: {model_name}")
 
 
@@ -314,9 +406,16 @@ def evaluate(model: nn.Module, features: torch.Tensor, labels: torch.Tensor, dev
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train a classifier using PLIP or MUSK embeddings")
+    parser = argparse.ArgumentParser(
+        description="Train a classifier using PLIP, MUSK, or CONCH embeddings"
+    )
     parser.add_argument("csv", type=str, help="Path to the image/text manifest")
-    parser.add_argument("--model", choices=["plip", "musk"], required=True, help="Encoder to use")
+    parser.add_argument(
+        "--model",
+        choices=["plip", "musk", "conch"],
+        required=True,
+        help="Encoder to use",
+    )
     parser.add_argument("--image-root", type=str, default=None, help="Optional root directory for image paths")
     parser.add_argument("--image-column", type=str, default="patch_path", help="CSV column containing image paths")
     parser.add_argument("--text-column", type=str, default="generated_text", help="CSV column containing text prompts")
@@ -334,9 +433,38 @@ def main() -> None:
     parser.add_argument("--musk-checkpoint", type=str, default="hf_hub:xiangjx/musk")
     parser.add_argument("--musk-precision", choices=["fp16", "fp32"], default="fp16")
     parser.add_argument("--text-tokenizer", type=str, default=None, help="SentencePiece tokenizer path for MUSK")
-    parser.add_argument("--hf-token", type=str, default=None, help="Hugging Face token for MUSK checkpoints")
+    parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="Hugging Face token for gated MUSK/CONCH checkpoints",
+    )
     parser.add_argument("--musk-repo", type=str, default=None, help="Path to a local MUSK clone to add to sys.path")
     parser.add_argument("--text-max-length", type=int, default=100, help="Maximum number of tokens for MUSK captions")
+    parser.add_argument(
+        "--conch-checkpoint",
+        type=str,
+        default=None,
+        help="Path or identifier for the CONCH checkpoint",
+    )
+    parser.add_argument(
+        "--conch-model-cfg",
+        type=str,
+        default="conch_ViT-B-16",
+        help="Model configuration string for CONCH",
+    )
+    parser.add_argument(
+        "--conch-precision",
+        choices=["fp16", "fp32"],
+        default="fp16",
+        help="Floating point precision for CONCH inference",
+    )
+    parser.add_argument(
+        "--conch-force-img-size",
+        type=int,
+        default=None,
+        help="Optional forced image size passed to CONCH preprocessing",
+    )
     args = parser.parse_args()
 
     samples, label_map = read_manifest(
@@ -364,6 +492,10 @@ def main() -> None:
         hf_token=args.hf_token,
         musk_repo=args.musk_repo,
         text_max_length=args.text_max_length,
+        conch_checkpoint=args.conch_checkpoint,
+        conch_model_cfg=args.conch_model_cfg,
+        conch_precision=args.conch_precision,
+        conch_force_img_size=args.conch_force_img_size,
     )
     features_val = encode_features(
         model_name=args.model,
@@ -377,6 +509,10 @@ def main() -> None:
         hf_token=args.hf_token,
         musk_repo=args.musk_repo,
         text_max_length=args.text_max_length,
+        conch_checkpoint=args.conch_checkpoint,
+        conch_model_cfg=args.conch_model_cfg,
+        conch_precision=args.conch_precision,
+        conch_force_img_size=args.conch_force_img_size,
     )
     features_test = encode_features(
         model_name=args.model,
@@ -390,6 +526,10 @@ def main() -> None:
         hf_token=args.hf_token,
         musk_repo=args.musk_repo,
         text_max_length=args.text_max_length,
+        conch_checkpoint=args.conch_checkpoint,
+        conch_model_cfg=args.conch_model_cfg,
+        conch_precision=args.conch_precision,
+        conch_force_img_size=args.conch_force_img_size,
     )
 
     labels_train = torch.tensor([sample.label for sample in train_samples], dtype=torch.long)
