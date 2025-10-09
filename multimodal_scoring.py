@@ -199,51 +199,71 @@ def compute_cmi_lb_across_magnifications(
     return results
 
 
-def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
-    device = torch.device(args.device)
-    image_embeddings, text_embeddings = load_multimodal_embeddings(args.features, device)
-
-    magnifications = args.magnifications or list(sorted(image_embeddings.keys()))
-    msci_result = compute_msci(image_embeddings, text_embeddings, magnifications)
-    cmi_results = compute_cmi_lb_across_magnifications(
-        image_embeddings, text_embeddings, magnifications, args.temperature
-    )
-
-    cmi_avg = float(sum(r.cmi_lb for r in cmi_results.values()) / len(cmi_results))
-
-    if args.json:
-        payload = {
-            "msci": msci_result.to_dict(),
-            "cmi_lb": {mag: result.to_dict() for mag, result in cmi_results.items()},
-            "cmi_lb_mean": cmi_avg,
-        }
-        with open(args.json, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
-
-    print("=== MSCI ===")
-    print(f"MSCI score: {msci_result.msci:.6f}")
-    print("Per-region variance (first 10 values):")
-    preview = msci_result.per_region_variance[:10].cpu().numpy()
-    print(preview)
-
-    print("\n=== CMI-LB ===")
-    for mag in magnifications:
-        result = cmi_results[mag]
-        print(
-            f"Magnification {mag}x -> CMI-LB: {result.cmi_lb:.6f} (Lx={result.loss_x:.6f}, Ly={result.loss_y:.6f})"
-        )
-    print(f"Average CMI-LB across magnifications: {cmi_avg:.6f}")
+def _summarise_for_json(msci_result: MSCIResult, cmi_results: Dict[int, CMILBResult], cmi_avg: float) -> Dict[str, object]:
+    """Convert metric objects into a JSON-serialisable dictionary."""
 
     return {
-        "msci": msci_result,
-        "cmi_lb": cmi_results,
+        "msci": msci_result.to_dict(),
+        "cmi_lb": {mag: result.to_dict() for mag, result in cmi_results.items()},
         "cmi_lb_mean": cmi_avg,
     }
 
 
+def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
+    device = torch.device(args.device)
+    aggregated_results: Dict[str, object] = {}
+    json_payload: Dict[str, object] = {}
+
+    for feature_path in args.features:
+        print(f"\n=== Evaluating features: {feature_path} ===")
+        image_embeddings, text_embeddings = load_multimodal_embeddings(feature_path, device)
+
+        magnifications = args.magnifications or list(sorted(image_embeddings.keys()))
+        msci_result = compute_msci(image_embeddings, text_embeddings, magnifications)
+        cmi_results = compute_cmi_lb_across_magnifications(
+            image_embeddings, text_embeddings, magnifications, args.temperature
+        )
+
+        cmi_avg = float(sum(r.cmi_lb for r in cmi_results.values()) / len(cmi_results))
+
+        print("--- MSCI ---")
+        print(f"MSCI score: {msci_result.msci:.6f}")
+        print("Per-region variance (first 10 values):")
+        preview = msci_result.per_region_variance[:10].cpu().numpy()
+        print(preview)
+
+        print("\n--- CMI-LB ---")
+        for mag in magnifications:
+            result = cmi_results[mag]
+            print(
+                f"Magnification {mag}x -> CMI-LB: {result.cmi_lb:.6f} (Lx={result.loss_x:.6f}, Ly={result.loss_y:.6f})"
+            )
+        print(f"Average CMI-LB across magnifications: {cmi_avg:.6f}")
+
+        aggregated_results[feature_path] = {
+            "msci": msci_result,
+            "cmi_lb": cmi_results,
+            "cmi_lb_mean": cmi_avg,
+        }
+
+        if args.json:
+            json_payload[feature_path] = _summarise_for_json(msci_result, cmi_results, cmi_avg)
+
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as handle:
+            json.dump(json_payload, handle, indent=2)
+
+    return aggregated_results
+
+
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compute multimodal transferability metrics.")
-    parser.add_argument("features", type=str, help="Path to the multimodal feature .pth file.")
+    parser.add_argument(
+        "features",
+        type=str,
+        nargs="+",
+        help="One or more multimodal feature .pth files to evaluate.",
+    )
     parser.add_argument(
         "--device",
         type=str,

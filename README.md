@@ -200,17 +200,18 @@ pipelines.
 
 `multimodal_scoring.py` implements the Magnification-Scale Consistency
 Index (MSCI) and a cross-modal mutual information lower bound (CMI-LB)
-for paired image/text embeddings stored in a single `.pth` file. The
+for paired image/text embeddings stored in `.pth` files. Each feature
 file must contain a `text_embeddings` tensor and an
 `image_embeddings` dictionary mapping magnification levels (e.g. 5/10/20)
-to the corresponding image feature tensors. To evaluate the metrics, run:
+to the corresponding image feature tensors. To evaluate one or more
+feature sets, run:
 
 ```bash
-python multimodal_scoring.py /path/to/multimodal_features.pth --device cuda:0 \
-    --temperature 0.07 --json multimodal_scores.json
+python multimodal_scoring.py /path/to/plip_features.pth /path/to/musk_features.pth \
+    --device cuda:0 --temperature 0.07 --json multimodal_scores.json
 ```
 
-By default all magnifications present in the feature file are used.
-Setting `--magnifications` allows evaluation on a subset, while the
-`--json` flag stores the resulting metrics in JSON format for further
-analysis.
+By default all magnifications present in each feature file are used.
+Setting `--magnifications` allows evaluation on a subset (shared across
+all inputs), while the `--json` flag stores the resulting metrics in a
+single JSON document keyed by feature path for further analysis.
