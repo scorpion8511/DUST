@@ -136,6 +136,7 @@ and metadata as the TorchScript/PLIP/MUSK pipelines.
 
 ```bash
 python conch_feature_extraction.py manifest.csv conch_features.pth \
+    --hf-token hf_YOUR_WRITE_TOKEN \
     --checkpoint ./checkpoints/CONCH/pytorch_model.bin \
     --model-cfg conch_ViT-B-16 \
     --image-root /home/jovyan/work/tran_est/multires_VL/output \
@@ -150,6 +151,11 @@ exactly as in CONCH's reference snippets. Embeddings are L2-normalised by
 default; pass `--no-normalize` to retain raw outputs. The exported metadata
 records the resolved region ids, unique captions per region, original CSV
 identifiers, and the model/checkpoint parameters used for provenance.
+
+Pass `--hf-token` when the checkpoint resides in a gated Hugging Face
+repository; the script performs `huggingface_hub.login` for you. Omit the flag
+after authenticating with `huggingface-cli login` or when loading local
+checkpoints.
 
 ### MUSK timm extractor
 

@@ -40,6 +40,20 @@ from torch.utils.data import DataLoader
 from multimodal_feature_extraction import ImageTextCSVDataset
 
 
+def _maybe_login(token: Optional[str]) -> None:
+    """Authenticate with Hugging Face if a token is provided."""
+
+    if not token:
+        return
+
+    try:  # pragma: no cover - runtime side effect
+        from huggingface_hub import login
+
+        login(token, add_to_git_credential=False)
+    except Exception as exc:  # pragma: no cover - informative failure
+        raise RuntimeError("Failed to authenticate with Hugging Face.") from exc
+
+
 @dataclass
 class RegionAccumulator:
     """Accumulates embeddings and metadata for a region across magnifications."""
@@ -351,6 +365,12 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Optional path or identifier passed to conch.get_tokenizer (defaults to the CONCH tokenizer).",
     )
     parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="Hugging Face token for gated checkpoints (login is skipped when unset).",
+    )
+    parser.add_argument(
         "--force-img-size",
         type=int,
         default=None,
@@ -384,6 +404,8 @@ def load_conch_model(args: argparse.Namespace):
 
 
 def run(args: argparse.Namespace) -> Dict[str, object]:
+    _maybe_login(getattr(args, "hf_token", None))
+
     model, preprocess, tokenizer, tokenize_fn, device = load_conch_model(args)
 
     dataset = ImageTextCSVDataset(
