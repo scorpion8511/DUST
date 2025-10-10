@@ -1,4 +1,4 @@
-"""Train a simple classifier on PLIP, MUSK, or CONCH embeddings.
+"""Train a simple classifier on PLIP, MUSK, CONCH, or PathGen embeddings.
 
 This script reads an image/text CSV manifest with class labels, encodes each
 pair using either the PLIP or MUSK encoders, and then trains a linear classifier
@@ -14,6 +14,7 @@ import csv
 import os
 import random
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -285,6 +286,71 @@ class CONCHEncoder:
         return torch.cat(features, dim=0)
 
 
+class PathGenEncoder:
+    """Helper for PathGen checkpoints loaded via open_clip."""
+
+    def __init__(
+        self,
+        model_name: str,
+        pretrained: str,
+        device: str,
+        precision: str,
+        hf_token: Optional[str],
+    ) -> None:
+        if not pretrained:
+            raise ValueError("--pathgen-pretrained is required when --model pathgen is selected")
+
+        _maybe_login(hf_token)
+
+        from PIL import Image  # noqa: F401  (ensure Pillow is available at runtime)
+        import open_clip
+
+        self.device = torch.device(device)
+        self.dtype = torch.float16 if precision == "fp16" else torch.float32
+
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            model_name,
+            pretrained=pretrained,
+        )
+        self.tokenizer = open_clip.get_tokenizer(model_name)
+
+        self.model.to(self.device, dtype=self.dtype).eval()
+
+    def encode(self, samples: Sequence[Sample], batch_size: int, normalize: bool) -> torch.Tensor:
+        from PIL import Image
+
+        features: List[torch.Tensor] = []
+        for start in range(0, len(samples), batch_size):
+            chunk = samples[start : start + batch_size]
+            images = [self.preprocess(Image.open(s.image_path).convert("RGB")) for s in chunk]
+            texts = [s.text for s in chunk]
+
+            image_tensor = torch.stack(images).to(self.device, dtype=self.dtype)
+            text_tokens = self.tokenizer(texts).to(self.device)
+
+            autocast_ctx = (
+                torch.cuda.amp.autocast(dtype=torch.float16)
+                if self.device.type == "cuda" and self.dtype == torch.float16
+                else nullcontext()
+            )
+
+            with torch.inference_mode():
+                with autocast_ctx:
+                    image_embeddings = self.model.encode_image(image_tensor)
+                    text_embeddings = self.model.encode_text(text_tokens)
+
+            if normalize:
+                image_embeddings = F.normalize(image_embeddings, dim=-1)
+                text_embeddings = F.normalize(text_embeddings, dim=-1)
+
+            combined = torch.cat(
+                [image_embeddings.float(), text_embeddings.float()], dim=-1
+            )
+            features.append(combined.cpu())
+
+        return torch.cat(features, dim=0)
+
+
 def resolve_tokenizer_path(musk_repo: Optional[str]) -> str:
     """Infer the MUSK tokenizer path from a local clone."""
 
@@ -323,6 +389,9 @@ def encode_features(
     conch_model_cfg: str,
     conch_precision: str,
     conch_force_img_size: Optional[int],
+    pathgen_model: str,
+    pathgen_pretrained: Optional[str],
+    pathgen_precision: str,
 ) -> torch.Tensor:
     if model_name == "plip":
         return encode_with_plip(samples, "vinid/plip", batch_size, normalize, device)
@@ -350,6 +419,15 @@ def encode_features(
             precision=conch_precision,
             hf_token=hf_token,
             force_img_size=conch_force_img_size,
+        )
+        return encoder.encode(samples, batch_size, normalize)
+    if model_name == "pathgen":
+        encoder = PathGenEncoder(
+            model_name=pathgen_model,
+            pretrained=pathgen_pretrained or "",
+            device=device,
+            precision=pathgen_precision,
+            hf_token=hf_token,
         )
         return encoder.encode(samples, batch_size, normalize)
     raise ValueError(f"Unsupported model: {model_name}")
@@ -407,12 +485,12 @@ def evaluate(model: nn.Module, features: torch.Tensor, labels: torch.Tensor, dev
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Train a classifier using PLIP, MUSK, or CONCH embeddings"
+        description="Train a classifier using PLIP, MUSK, CONCH, or PathGen embeddings"
     )
     parser.add_argument("csv", type=str, help="Path to the image/text manifest")
     parser.add_argument(
         "--model",
-        choices=["plip", "musk", "conch"],
+        choices=["plip", "musk", "conch", "pathgen"],
         required=True,
         help="Encoder to use",
     )
@@ -437,7 +515,7 @@ def main() -> None:
         "--hf-token",
         type=str,
         default=None,
-        help="Hugging Face token for gated MUSK/CONCH checkpoints",
+        help="Hugging Face token for gated MUSK/CONCH/PathGen checkpoints",
     )
     parser.add_argument("--musk-repo", type=str, default=None, help="Path to a local MUSK clone to add to sys.path")
     parser.add_argument("--text-max-length", type=int, default=100, help="Maximum number of tokens for MUSK captions")
@@ -464,6 +542,24 @@ def main() -> None:
         type=int,
         default=None,
         help="Optional forced image size passed to CONCH preprocessing",
+    )
+    parser.add_argument(
+        "--pathgen-model",
+        type=str,
+        default="ViT-B-16",
+        help="Model backbone string passed to open_clip.create_model_and_transforms",
+    )
+    parser.add_argument(
+        "--pathgen-pretrained",
+        type=str,
+        default=None,
+        help="Checkpoint identifier or path for the PathGen model",
+    )
+    parser.add_argument(
+        "--pathgen-precision",
+        choices=["fp16", "fp32"],
+        default="fp16",
+        help="Floating point precision for PathGen inference",
     )
     args = parser.parse_args()
 
@@ -496,6 +592,9 @@ def main() -> None:
         conch_model_cfg=args.conch_model_cfg,
         conch_precision=args.conch_precision,
         conch_force_img_size=args.conch_force_img_size,
+        pathgen_model=args.pathgen_model,
+        pathgen_pretrained=args.pathgen_pretrained,
+        pathgen_precision=args.pathgen_precision,
     )
     features_val = encode_features(
         model_name=args.model,
@@ -513,6 +612,9 @@ def main() -> None:
         conch_model_cfg=args.conch_model_cfg,
         conch_precision=args.conch_precision,
         conch_force_img_size=args.conch_force_img_size,
+        pathgen_model=args.pathgen_model,
+        pathgen_pretrained=args.pathgen_pretrained,
+        pathgen_precision=args.pathgen_precision,
     )
     features_test = encode_features(
         model_name=args.model,
@@ -530,6 +632,9 @@ def main() -> None:
         conch_model_cfg=args.conch_model_cfg,
         conch_precision=args.conch_precision,
         conch_force_img_size=args.conch_force_img_size,
+        pathgen_model=args.pathgen_model,
+        pathgen_pretrained=args.pathgen_pretrained,
+        pathgen_precision=args.pathgen_precision,
     )
 
     labels_train = torch.tensor([sample.label for sample in train_samples], dtype=torch.long)

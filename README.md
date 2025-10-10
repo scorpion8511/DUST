@@ -157,6 +157,33 @@ repository; the script performs `huggingface_hub.login` for you. Omit the flag
 after authenticating with `huggingface-cli login` or when loading local
 checkpoints.
 
+### PathGen feature extractor
+
+`pathgen_feature_extraction.py` mirrors the same CSV schema for PathGen CLIP
+checkpoints distributed alongside the PathGen release. The script relies on
+`open_clip.create_model_and_transforms` to load the requested backbone, applies
+the returned preprocessing pipeline to each image patch, and tokenises captions
+with the matching `open_clip` tokenizer before exporting a `.pth` archive that
+`multimodal_scoring.py` understands out of the box.
+
+```bash
+python pathgen_feature_extraction.py manifest.csv pathgen_features.pth \
+    --pretrained path/pathgen-clip.pt \
+    --model ViT-B-16 --device cuda:0 --precision fp16 \
+    --image-root /home/jovyan/work/tran_est/multires_VL/output \
+    --image-column patch_path --text-column generated_text \
+    --magnification-column patch_scale --region-column patch_id \
+    --strip-region-suffix --metadata-json pathgen_metadata.json
+```
+
+Embeddings are L2-normalised by default so they can be compared with cosine
+similarity; pass `--no-normalize` to retain the raw outputs. Provide
+`--hf-token` when the checkpoint lives behind Hugging Face access controls—the
+script invokes `huggingface_hub.login` before downloading weights. Metadata in
+the exported archive mirrors the other extractors, capturing region ids, unique
+captions, per-magnification patch geometry, and provenance for the model
+configuration and checkpoint path.
+
 ### MUSK timm extractor
 
 `musk_feature_extraction.py` now follows the official MUSK instructions: the
@@ -204,8 +231,8 @@ text fields.
 The script accepts the same manifest structure as the extraction utilities
 (image paths, text descriptions, optional filtering) along with a class label
 column. It splits the manifest into train/validation/test subsets, encodes each
-sample with either PLIP or MUSK, concatenates the resulting embeddings, and
-trains a linear classifier.
+sample with the requested encoder (PLIP, MUSK, CONCH, or PathGen), concatenates
+the resulting embeddings, and trains a linear classifier.
 
 ```bash
 python multimodal_finetune.py manifest.csv \
@@ -218,7 +245,11 @@ python multimodal_finetune.py manifest.csv \
 Switch `--model musk` to fine-tune on MUSK embeddings. When using MUSK, provide
 `--text-tokenizer` or point `--musk-repo` at a local clone containing
 `tokenizer.spm`, and pass `--hf-token` if the checkpoint is gated on Hugging
-Face. Validation and test accuracies are printed at the end of the run.
+Face. `--model conch` and `--model pathgen` activate the corresponding
+`open_clip`-based encoders; supply `--conch-checkpoint` or `--pathgen-pretrained`
+to locate the weights (local path or Hugging Face identifier) and reuse
+`--hf-token` whenever access control is in place. Validation and test accuracies
+are printed at the end of the run.
 
 Embeddings are L2-normalised by default, and repeated captions for the same
 region are averaged while retaining every unique description inside the exported
