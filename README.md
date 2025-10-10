@@ -40,6 +40,40 @@ All intermediate computations occur on the chosen device; results are
 normalized per dataset and combined using learned weights before
 reporting per-dataset Kendall τ correlations with ground-truth accuracy.
 
+### MSCI for single-modality embeddings
+
+In addition to the Gabor/Fisher metrics, the scoring pipeline can now
+compute the magnification-scale consistency index (MSCI) for unimodal
+embeddings. Provide a CSV manifest aligned with the evaluation features
+that includes a region identifier and magnification per patch, then add
+an `msci` block to each model configuration:
+
+```python
+dataset_model_paths = {
+    "LC": {
+        "uni": {
+            "train": "/path/to/uni_train_features.pth",
+            "eval": "/path/to/uni_eval_features.pth",
+            "msci": {
+                "manifest": "/path/to/manifest.csv",
+                "region_column": "region_id",
+                "magnification_column": "patch_scale",
+                "magnifications": [5, 10, 20, 40],
+            },
+        }
+    }
+}
+```
+
+The loader averages embeddings per magnification within each region,
+normalises them, and compares the resulting vectors against the region
+centroid. Reported statistics include the MSCI score itself, the raw
+mean variance across regions, the first ten per-region variances, and
+coverage counts so you can verify how many regions satisfied the
+requested magnification set. This keeps the unimodal evaluation
+comparable to the multimodal MSCI metric while preserving the original
+Gabor/Fisher outputs.
+
 ## Multimodal feature extraction
 
 `multimodal_feature_extraction.py` converts an image-text CSV manifest into the

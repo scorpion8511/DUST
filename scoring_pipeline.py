@@ -1,18 +1,153 @@
 import argparse
+from dataclasses import dataclass
+from typing import Any, Dict, Mapping, Sequence
+
 import numpy as np
+import pandas as pd
 import torch
-from typing import Dict, Sequence
 from scipy.stats import weightedtau
 
 from gabor_eng import compute_gabor_scores, benchmark_runtime
 
 
+@dataclass
+class MSCIResult:
+    score: float
+    mean_variance: float
+    max_variance: float
+    per_region_variance: Sequence[float]
+    regions_used: int
+    regions_total: int
+
+
+def _normalise_vector(vec: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(vec)
+    if norm == 0.0:
+        return vec
+    return vec / norm
+
+
+def _canonicalise_magnification(value: Any) -> str:
+    text = str(value).strip().replace("×", "x")
+    if text.lower().endswith("x"):
+        text = text[:-1]
+    return text
+
+
+def _prepare_magnification_key(value: Any) -> tuple[float, str]:
+    text = _canonicalise_magnification(value)
+    try:
+        numeric = float(text)
+    except ValueError:
+        return (float("inf"), _canonicalise_magnification(value))
+    return (numeric, _canonicalise_magnification(value))
+
+
+def compute_msci_single_modality(
+    eval_features: Mapping[str, Any],
+    manifest_path: str,
+    *,
+    region_column: str = "region_id",
+    magnification_column: str = "magnification",
+    magnifications: Sequence[Any] | None = None,
+) -> MSCIResult:
+    """Compute single-modality MSCI using evaluation embeddings and a manifest.
+
+    The manifest must align with the order of embeddings in ``eval_features`` and
+    contain one row per patch that includes the region identifier and
+    magnification. For each region, embeddings are averaged per magnification,
+    cosine-normalised, and compared against the region centroid to measure
+    cross-scale consistency.
+    """
+
+    if "embeddings" not in eval_features:
+        raise KeyError("Evaluation features must contain an 'embeddings' entry")
+
+    embeddings_tensor = eval_features["embeddings"]
+    if isinstance(embeddings_tensor, torch.Tensor):
+        embeddings = embeddings_tensor.detach().cpu().numpy()
+    else:
+        embeddings = np.asarray(embeddings_tensor)
+    if embeddings.ndim != 2:
+        raise ValueError("Embeddings must be a 2D array of shape (N, D)")
+
+    manifest = pd.read_csv(manifest_path)
+    if len(manifest) != embeddings.shape[0]:
+        raise ValueError(
+            "Manifest row count does not match number of embeddings: "
+            f"{len(manifest)} vs {embeddings.shape[0]}"
+        )
+
+    if magnifications is not None:
+        required = [_canonicalise_magnification(m) for m in magnifications]
+    else:
+        required = None
+
+    region_groups = manifest.groupby(region_column, sort=False)
+    per_region_vars: list[float] = []
+
+    for region, group in region_groups:
+        idx = group.index.to_numpy()
+        mags = group[magnification_column].apply(_canonicalise_magnification).tolist()
+        mag_to_embeddings: Dict[str, list[np.ndarray]] = {}
+        for row_idx, mag in zip(idx, mags):
+            mag_to_embeddings.setdefault(mag, []).append(embeddings[row_idx])
+
+        if required is not None and not set(required).issubset(mag_to_embeddings):
+            continue
+
+        ordered_mags = (
+            required
+            if required is not None
+            else [mag for _, mag in sorted((_prepare_magnification_key(m), m) for m in mag_to_embeddings)]
+        )
+
+        mag_vectors: list[np.ndarray] = []
+        for mag in ordered_mags:
+            vectors = mag_to_embeddings.get(mag)
+            if not vectors:
+                continue
+            mean_vec = np.mean(np.stack(vectors, axis=0), axis=0)
+            mag_vectors.append(_normalise_vector(mean_vec))
+
+        if len(mag_vectors) < 2:
+            continue
+
+        centroid = _normalise_vector(np.mean(mag_vectors, axis=0))
+        similarities = np.array([float(np.dot(vec, centroid)) for vec in mag_vectors])
+        variance = float(np.var(similarities, ddof=0))
+        per_region_vars.append(variance)
+
+    regions_used = len(per_region_vars)
+    regions_total = region_groups.ngroups
+    if regions_used == 0:
+        raise ValueError(
+            "No regions with the required magnifications were found to compute MSCI"
+        )
+
+    mean_variance = float(np.mean(per_region_vars))
+    max_variance = 1.0  # cosine similarities lie in [-1, 1]
+    score = 1.0 - min(max(mean_variance / max_variance, 0.0), 1.0)
+
+    return MSCIResult(
+        score=score,
+        mean_variance=mean_variance,
+        max_variance=max_variance,
+        per_region_variance=per_region_vars,
+        regions_used=regions_used,
+        regions_total=regions_total,
+    )
+
+
 def compute_gabor_scores_from_paths(
-    train_features_path: str, eval_features_path: str, device: str = "cpu"
-) -> Dict[str, float]:
+    train_features_path: str,
+    eval_features_path: str,
+    device: str = "cpu",
+    msci_config: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
     train = torch.load(train_features_path, map_location=device)
     evald = torch.load(eval_features_path, map_location=device)
-    scores = compute_gabor_scores(
+    scores: Dict[str, Any] = compute_gabor_scores(
         train["embeddings"],
         train["labels"],
         evald["embeddings"],
@@ -21,22 +156,79 @@ def compute_gabor_scores_from_paths(
     )
     print(f"Gabor Energy Score (Full): {scores['energy']}")
     print(f"Gabor Fisher Score: {scores['fisher']}")
+
+    if msci_config:
+        manifest_path = msci_config.get("manifest") or msci_config.get("manifest_path")
+        if manifest_path:
+            result = compute_msci_single_modality(
+                evald,
+                manifest_path,
+                region_column=msci_config.get("region_column", "region_id"),
+                magnification_column=msci_config.get("magnification_column", "magnification"),
+                magnifications=msci_config.get("magnifications"),
+            )
+            scores["msci"] = result.score
+            scores["msci_mean_variance"] = result.mean_variance
+            scores["msci_max_variance"] = result.max_variance
+            scores["msci_regions_used"] = result.regions_used
+            scores["msci_regions_total"] = result.regions_total
+            scores["msci_variances"] = list(result.per_region_variance)
+            print(
+                "MSCI score: "
+                f"{result.score:.6f} (mean variance={result.mean_variance:.6f}, "
+                f"regions used={result.regions_used}/{result.regions_total})"
+            )
+            if result.per_region_variance:
+                preview = result.per_region_variance[:10]
+                print(
+                    "Per-region variance (first 10 values): "
+                    + np.array2string(np.asarray(preview), separator=", ")
+                )
     return scores
 
 
+def _extract_paths_config(
+    paths: Any,
+) -> tuple[str, str, Mapping[str, Any] | None]:
+    if isinstance(paths, Mapping):
+        train_path = paths.get("train") or paths.get("path")
+        if train_path is None:
+            raise ValueError("Model configuration dictionary must include a 'train' path")
+        eval_path = paths.get("eval", train_path)
+        msci_cfg = paths.get("msci")
+        manifest = paths.get("manifest")
+        if manifest:
+            msci_cfg = dict(msci_cfg or {})
+            msci_cfg.setdefault("manifest", manifest)
+        return str(train_path), str(eval_path), msci_cfg
+
+    if isinstance(paths, (tuple, list)):
+        if len(paths) == 3:
+            train_path, eval_path, manifest_path = paths
+            return str(train_path), str(eval_path), {"manifest": manifest_path}
+        if len(paths) == 2:
+            train_path, eval_path = paths
+            return str(train_path), str(eval_path), None
+        if len(paths) == 1:
+            (train_path,) = paths
+            return str(train_path), str(train_path), None
+        raise ValueError("Model path tuples must have length 1, 2, or 3")
+
+    return str(paths), str(paths), None
+
+
 def compute_scores_for_all_models(
-    model_paths: Dict[str, Sequence[str]], device: str = "cpu"
-) -> Dict[str, Dict[str, float]]:
-    results: Dict[str, Dict[str, float]] = {}
+    model_paths: Dict[str, Any], device: str = "cpu"
+) -> Dict[str, Dict[str, Any]]:
+    results: Dict[str, Dict[str, Any]] = {}
     for model_name, paths in model_paths.items():
         print(f"\nProcessing model: {model_name}")
-        if isinstance(paths, (tuple, list)) and len(paths) == 2:
-            train_path, eval_path = paths
-        else:
-            train_path = eval_path = paths
+        train_path, eval_path, msci_cfg = _extract_paths_config(paths)
         print(f"Training features: {train_path}")
         print(f"Evaluation features: {eval_path}")
-        scores = compute_gabor_scores_from_paths(train_path, eval_path, device=device)
+        scores = compute_gabor_scores_from_paths(
+            train_path, eval_path, device=device, msci_config=msci_cfg
+        )
         results[model_name] = scores
     return results
 
