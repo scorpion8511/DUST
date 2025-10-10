@@ -3,12 +3,19 @@ transferability estimation
 
 ## Feature Extraction
 
-`extract_features.py` splits a dataset into training and evaluation
-subsets (80/20 by default) and saves each model's embeddings to separate
-files:
+`extract_features.py` consumes a CSV manifest of multi-scale patches,
+splits the rows into named subsets, and writes each model's embeddings to
+`MODEL_<split>_features.pth` files. When the manifest already contains a
+split column (e.g., `train`/`val`/`test`), pass the column name with
+`--split-column` and specify which values map to the train/eval splits via
+`--train-splits`/`--eval-splits`. If the column is missing, the script
+automatically assigns random splits (80/20 train/eval by default) using a
+deterministic seed so repeated runs remain reproducible. Custom ratios can
+be provided with repeated `--split-ratio value=fraction` arguments, and the
+seed can be overridden via `--random-seed`.
 
 ```bash
-python extract_features.py /path/to/images out_dir --device cuda:0
+python extract_features.py manifest.csv out_dir --image-root /path/to/patches --device cuda:0
 ```
 
 This command produces `MODEL_train_features.pth` and

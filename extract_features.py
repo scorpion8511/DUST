@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
@@ -139,6 +140,100 @@ def select_split(
         raise ValueError(f"Split column '{split_column}' not present in manifest")
     mask = df[split_column].isin(values)
     return df[mask].copy()
+
+
+def assign_random_splits(
+    df: pd.DataFrame,
+    *,
+    split_column: str,
+    split_specs: Mapping[str, Sequence[str]],
+    ratio_map: Mapping[str, float],
+    seed: int,
+) -> pd.DataFrame:
+    if not split_specs:
+        raise ValueError("Cannot generate random splits without split specifications")
+
+    ordered_values: List[str] = []
+    for values in split_specs.values():
+        for value in values:
+            if value not in ordered_values:
+                ordered_values.append(value)
+    if not ordered_values:
+        raise ValueError("Split specifications did not include any split values")
+
+    if ratio_map:
+        specified_total = 0.0
+        unspecified_values: List[str] = []
+        base_ratios: List[float] = []
+        for value in ordered_values:
+            if value in ratio_map:
+                ratio = ratio_map[value]
+                if ratio < 0:
+                    raise ValueError(
+                        f"Split ratio for value '{value}' must be non-negative"
+                    )
+                base_ratios.append(ratio)
+                specified_total += ratio
+            else:
+                unspecified_values.append(value)
+                base_ratios.append(np.nan)
+        if specified_total > 1 + 1e-6:
+            raise ValueError(
+                "Sum of provided split ratios exceeds 1.0; adjust the specifications"
+            )
+        remaining = max(0.0, 1.0 - specified_total)
+        fill_value = (
+            remaining / len(unspecified_values)
+            if unspecified_values and remaining > 0
+            else 0.0
+        )
+        ratios_array = np.array(
+            [fill_value if np.isnan(x) else x for x in base_ratios], dtype=np.float64
+        )
+        if not np.any(ratios_array):
+            ratios_array = np.ones(len(ordered_values), dtype=np.float64)
+        else:
+            ratios_array = ratios_array / ratios_array.sum()
+    else:
+        if len(ordered_values) == 1:
+            ratios_array = np.ones(1, dtype=np.float64)
+        else:
+            primary = 0.8
+            tail = (1.0 - primary) / (len(ordered_values) - 1)
+            ratios_array = np.array(
+                [primary] + [tail] * (len(ordered_values) - 1), dtype=np.float64
+            )
+
+    total = len(df)
+    expected = ratios_array * total
+    counts = np.floor(expected).astype(int)
+    remainder = total - counts.sum()
+    if remainder > 0:
+        fractional = expected - counts
+        order = np.argsort(-fractional)
+        for idx in order[:remainder]:
+            counts[idx] += 1
+
+    assignments = np.empty(total, dtype=object)
+    rng = np.random.default_rng(seed)
+    shuffled_indices = rng.permutation(total)
+    start = 0
+    for value, count in zip(ordered_values, counts):
+        end = start + count
+        slice_indices = shuffled_indices[start:end]
+        assignments[slice_indices] = value
+        start = end
+    if start < total:
+        assignments[shuffled_indices[start:]] = ordered_values[-1]
+
+    df = df.copy()
+    df[split_column] = assignments.tolist()
+    proportions = {
+        value: float((assignments == value).sum()) / float(total)
+        for value in ordered_values
+    }
+    df.attrs["split_proportions"] = proportions
+    return df
 
 
 def samples_from_dataframe(
@@ -288,6 +383,30 @@ def parse_extra_splits(entries: Sequence[str]) -> Dict[str, List[str]]:
     return specs
 
 
+def parse_split_ratios(entries: Sequence[str]) -> Dict[str, float]:
+    ratios: Dict[str, float] = {}
+    for entry in entries:
+        if "=" not in entry:
+            raise ValueError(
+                "Split ratio specifications must use the format value=fraction"
+            )
+        name, value = entry.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name or not value:
+            raise ValueError(f"Invalid split ratio specification: {entry}")
+        try:
+            fraction = float(value)
+        except ValueError as exc:  # pragma: no cover - defensive
+            raise ValueError(
+                f"Split ratio specification '{entry}' has a non-numeric fraction"
+            ) from exc
+        if fraction < 0:
+            raise ValueError(f"Split ratio for '{name}' must be non-negative")
+        ratios[name] = fraction
+    return ratios
+
+
 def main(args: argparse.Namespace) -> None:
     df = load_manifest(
         args.manifest,
@@ -315,6 +434,24 @@ def main(args: argparse.Namespace) -> None:
 
     if not split_specs:
         raise ValueError("At least one split must be specified for feature extraction")
+
+    ratio_map = parse_split_ratios(args.split_ratio)
+    if args.split_column and args.split_column not in df.columns:
+        df = assign_random_splits(
+            df,
+            split_column=args.split_column,
+            split_specs=split_specs,
+            ratio_map=ratio_map,
+            seed=args.random_seed,
+        )
+        print(
+            "Split column not found in manifest; generated random assignments using column "
+            f"'{args.split_column}'"
+        )
+        proportions = df.attrs.pop("split_proportions", None)
+        if proportions:
+            summary = ", ".join(f"{name}: {fraction:.3f}" for name, fraction in proportions.items())
+            print(f"Random split proportions -> {summary}")
 
     subsets: Dict[str, pd.DataFrame] = {}
     for split_name, values in split_specs.items():
@@ -405,6 +542,7 @@ if __name__ == "__main__":
     parser.add_argument("--train-splits", nargs="*", default=["train"], help="Values that identify training rows in the split column")
     parser.add_argument("--eval-splits", nargs="*", default=["val"], help="Values that identify evaluation rows in the split column")
     parser.add_argument("--extra-split", action="append", default=[], help="Additional split specification of the form name=value1,value2")
+    parser.add_argument("--split-ratio", action="append", default=[], help="Optional ratio specification for random splits when the split column is missing (value=fraction)")
     parser.add_argument("--filter-column", type=str, default=None, help="Optional column used to filter rows before processing")
     parser.add_argument("--filter-values", nargs="*", default=None, help="Allowed values for the filter column")
     parser.add_argument("--device", type=str, default="cpu", help="Device to run inference on (cpu or cuda:0)")
@@ -412,5 +550,6 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--image-size", type=int, default=224, help="Image resize dimension")
     parser.add_argument("--normalize", action="store_true", help="Apply L2 normalisation to embeddings")
+    parser.add_argument("--random-seed", type=int, default=42, help="Random seed used when generating missing split assignments")
     args = parser.parse_args()
     main(args)
