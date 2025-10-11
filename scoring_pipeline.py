@@ -544,10 +544,61 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     dataset_model_paths = {
-        "LC": {"uni": ("/path/to/train.pth", "/path/to/eval.pth")}
+        "TCGA": {
+            "uni": {
+                "train": "/home/jovyan/work/tran_est/MUST/features_unimodal/uni_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/uni_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
+                    "region_column": "region_id",
+                    "magnification_column": "patch_scale",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "conch": {
+                "train": "/home/jovyan/work/tran_est/MUST/features_unimodal/conch_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/conch_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
+                    "region_column": "region_id",
+                    "magnification_column": "patch_scale",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "giga": {
+                "train": "/home/jovyan/work/tran_est/MUST/features_unimodal/giga_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/giga_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
+                    "region_column": "region_id",
+                    "magnification_column": "patch_scale",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "phikon": {
+                "train": "/home/jovyan/work/tran_est/MUST/features_unimodal/phikon_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/phikon_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
+                    "region_column": "region_id",
+                    "magnification_column": "patch_scale",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "virchow": {
+                "train": "/home/jovyan/work/tran_est/MUST/features_unimodal/virchow_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/virchow_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
+                    "region_column": "region_id",
+                    "magnification_column": "patch_scale",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+        }
     }
     raw_scores = compute_scores_for_all_datasets(dataset_model_paths, device=args.device)
-    ground_truth = {"LC": {"uni": 0.94}}
+    ground_truth = {"TCGA": {"uni": 0.94}}
     weights, signs = derive_optimal_weights(raw_scores, ground_truth)
     combined_scores = normalize_and_combine_scores(raw_scores, weights=weights, signs=signs)
     compute_kendall_tau_across_datasets(combined_scores, ground_truth)
