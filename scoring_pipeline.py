@@ -6,13 +6,10 @@ from typing import Any, Dict, Mapping, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from scipy.stats import weightedtau
 
 from gabor_eng import compute_gabor_scores, benchmark_runtime
-from multimodal_scoring import (
-    MSCIResult as MultimodalMSCIResult,
-    compute_msci as compute_multimodal_msci,
-)
 
 
 @dataclass
@@ -101,6 +98,22 @@ def _strip_region_suffix(
     return cleaned
 
 
+def _max_variance(num_magnifications: int) -> float:
+    if num_magnifications <= 0:
+        raise ValueError("num_magnifications must be positive.")
+
+    max_var = 0.0
+    n = float(num_magnifications)
+    for k in range(num_magnifications + 1):
+        mean = (2.0 * k - n) / n
+        diff_pos = 1.0 - mean
+        diff_neg = -1.0 - mean
+        var = (k * diff_pos * diff_pos + (num_magnifications - k) * diff_neg * diff_neg) / n
+        if var > max_var:
+            max_var = var
+    return max_var
+
+
 def compute_msci_single_modality(
     eval_features: Mapping[str, Any],
     manifest_source: str | pd.DataFrame,
@@ -136,7 +149,7 @@ def compute_msci_single_modality(
         array = np.asarray(value)
         if array.ndim != 1:
             return None
-        if array.size != embeddings.shape[0]:
+        if array.size != embeddings_tensor.shape[0]:
             return None
         try:
             array = array.astype(int, copy=False)
@@ -223,57 +236,59 @@ def compute_msci_single_modality(
         raise ValueError("MSCI requires at least two magnification levels")
 
     region_groups = manifest.groupby("__msci_region", sort=False)
-    per_mag_embeddings: Dict[int, list[torch.Tensor]] = {mag: [] for mag in required}
-    centroid_embeddings: list[torch.Tensor] = []
-    regions_used = 0
+    region_stacks: list[torch.Tensor] = []
 
-    for region, group in region_groups:
+    for _, group in region_groups:
         mag_to_vectors: Dict[int, list[torch.Tensor]] = {}
-        for row in group.itertuples():
-            mag_int = getattr(row, "__msci_mag_int")
-            mag_to_vectors.setdefault(mag_int, []).append(
-                embeddings_tensor[row.Index]
-            )
+        for idx, mag_int in zip(group.index, group["__msci_mag_int"], strict=False):
+            mag_to_vectors.setdefault(int(mag_int), []).append(embeddings_tensor[int(idx)])
 
         if any(mag not in mag_to_vectors for mag in required):
             continue
 
-        per_mag_means: Dict[int, torch.Tensor] = {}
+        region_vectors: list[torch.Tensor] = []
+        valid = True
         for mag in required:
             vectors = mag_to_vectors.get(mag)
             if not vectors:
+                valid = False
                 break
             stacked = torch.stack(vectors, dim=0)
-            per_mag_means[mag] = stacked.mean(dim=0)
-        if len(per_mag_means) != len(required):
+            region_vectors.append(stacked.mean(dim=0))
+        if not valid:
             continue
 
-        regions_used += 1
-        centroid = torch.stack(list(per_mag_means.values()), dim=0).mean(dim=0)
-        centroid_embeddings.append(centroid)
-        for mag, mean_vec in per_mag_means.items():
-            per_mag_embeddings[mag].append(mean_vec)
+        region_stack = torch.stack(region_vectors, dim=0)
+        region_stacks.append(region_stack)
 
+    regions_used = len(region_stacks)
     if regions_used == 0:
         raise ValueError(
             "No regions with the required magnifications were found to compute MSCI"
         )
 
-    image_embeddings = {
-        mag: torch.stack(vectors, dim=0) for mag, vectors in per_mag_embeddings.items()
-    }
-    text_embeddings = torch.stack(centroid_embeddings, dim=0)
+    per_region_variances: list[float] = []
+    for stack in region_stacks:
+        normalised = F.normalize(stack, dim=-1)
+        centroid = F.normalize(normalised.mean(dim=0), dim=0)
+        sims = torch.sum(normalised * centroid, dim=-1)
+        mean_sim = sims.mean()
+        var = torch.mean((sims - mean_sim) ** 2)
+        per_region_variances.append(float(var.item()))
 
-    multimodal_result: MultimodalMSCIResult = compute_multimodal_msci(
-        image_embeddings, text_embeddings, required
-    )
+    variance_tensor = torch.tensor(per_region_variances, dtype=torch.float32)
+    mean_variance = float(variance_tensor.mean().item())
+    max_variance = _max_variance(len(required))
+    if max_variance > 0:
+        score = max(0.0, min(1.0, 1.0 - mean_variance / max_variance))
+    else:
+        score = 0.0
 
-    mean_variance = float(multimodal_result.mean_variance)
     return MSCIResult(
-        score=float(multimodal_result.msci),
+        score=score,
         mean_variance=mean_variance,
-        max_variance=float(multimodal_result.max_variance),
-        per_region_variance=list(multimodal_result.per_region_variance.cpu().numpy()),
+        max_variance=max_variance,
+        per_region_variance=per_region_variances,
         regions_used=regions_used,
         regions_total=region_groups.ngroups,
     )
