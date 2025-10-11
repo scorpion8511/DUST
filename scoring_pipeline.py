@@ -235,31 +235,61 @@ def compute_msci_single_modality(
     if len(required) < 2:
         raise ValueError("MSCI requires at least two magnification levels")
 
-    region_groups = manifest.groupby("__msci_region", sort=False)
-    region_stacks: list[torch.Tensor] = []
+    mag_counts = manifest["__msci_mag_int"].value_counts().to_dict()
+    grouped_regions = list(manifest.groupby("__msci_region", sort=False))
 
-    for _, group in region_groups:
-        mag_to_vectors: Dict[int, list[torch.Tensor]] = {}
-        for idx, mag_int in zip(group.index, group["__msci_mag_int"], strict=False):
-            mag_to_vectors.setdefault(int(mag_int), []).append(embeddings_tensor[int(idx)])
+    def _collect_region_stacks(required_mags: Sequence[int]) -> list[torch.Tensor]:
+        stacks: list[torch.Tensor] = []
+        for _, group in grouped_regions:
+            mag_to_vectors: Dict[int, list[torch.Tensor]] = {}
+            for idx, mag_int in zip(group.index, group["__msci_mag_int"], strict=False):
+                mag_to_vectors.setdefault(int(mag_int), []).append(
+                    embeddings_tensor[int(idx)]
+                )
 
-        if any(mag not in mag_to_vectors for mag in required):
-            continue
+            if any(mag not in mag_to_vectors for mag in required_mags):
+                continue
 
-        region_vectors: list[torch.Tensor] = []
-        valid = True
-        for mag in required:
-            vectors = mag_to_vectors.get(mag)
-            if not vectors:
-                valid = False
+            region_vectors: list[torch.Tensor] = []
+            valid = True
+            for mag in required_mags:
+                vectors = mag_to_vectors.get(mag)
+                if not vectors:
+                    valid = False
+                    break
+                stacked = torch.stack(vectors, dim=0)
+                region_vectors.append(stacked.mean(dim=0))
+            if not valid:
+                continue
+
+            stacks.append(torch.stack(region_vectors, dim=0))
+        return stacks
+
+    region_stacks = _collect_region_stacks(required)
+
+    if not region_stacks:
+        # Gradually relax the magnification requirements by dropping the least
+        # represented magnification until at least two levels remain. This
+        # mirrors the behaviour of the multimodal pipeline, which can leverage
+        # cross-split metadata to recover partial coverage.
+        coverage_order = sorted(
+            required,
+            key=lambda m: (mag_counts.get(m, 0), m),
+        )
+        for drop in range(1, len(required)):
+            candidate = [m for m in required if m not in set(coverage_order[:drop])]
+            if len(candidate) < 2:
                 break
-            stacked = torch.stack(vectors, dim=0)
-            region_vectors.append(stacked.mean(dim=0))
-        if not valid:
-            continue
-
-        region_stack = torch.stack(region_vectors, dim=0)
-        region_stacks.append(region_stack)
+            stacks = _collect_region_stacks(candidate)
+            if stacks:
+                warnings.warn(
+                    "MSCI fallback: insufficient coverage for magnifications "
+                    f"{required}, using {candidate} instead.",
+                    RuntimeWarning,
+                )
+                region_stacks = stacks
+                required = candidate
+                break
 
     regions_used = len(region_stacks)
     if regions_used == 0:
@@ -290,7 +320,7 @@ def compute_msci_single_modality(
         max_variance=max_variance,
         per_region_variance=per_region_variances,
         regions_used=regions_used,
-        regions_total=region_groups.ngroups,
+        regions_total=len(grouped_regions),
     )
 
 
