@@ -1,7 +1,7 @@
 import argparse
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Sequence
+from typing import Any, Dict, Mapping, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -9,6 +9,10 @@ import torch
 from scipy.stats import weightedtau
 
 from gabor_eng import compute_gabor_scores, benchmark_runtime
+from multimodal_scoring import (
+    MSCIResult as MultimodalMSCIResult,
+    compute_msci as compute_multimodal_msci,
+)
 
 
 @dataclass
@@ -53,6 +57,23 @@ def _prepare_magnification_key(value: Any) -> tuple[float, str]:
     return (numeric, _canonicalise_magnification(value))
 
 
+def _to_tensor(value: Any) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().to(torch.float32)
+    return torch.as_tensor(value, dtype=torch.float32)
+
+
+def _coerce_magnification_int(value: Any) -> Tuple[int | None, str]:
+    canon = _canonicalise_magnification(value)
+    try:
+        numeric = float(canon)
+    except ValueError:
+        return None, canon
+    if np.isclose(numeric, round(numeric)):
+        numeric = int(round(numeric))
+    return int(numeric), canon
+
+
 def compute_msci_single_modality(
     eval_features: Mapping[str, Any],
     manifest_source: str | pd.DataFrame,
@@ -73,12 +94,8 @@ def compute_msci_single_modality(
     if "embeddings" not in eval_features:
         raise KeyError("Evaluation features must contain an 'embeddings' entry")
 
-    embeddings_tensor = eval_features["embeddings"]
-    if isinstance(embeddings_tensor, torch.Tensor):
-        embeddings = embeddings_tensor.detach().cpu().numpy()
-    else:
-        embeddings = np.asarray(embeddings_tensor)
-    if embeddings.ndim != 2:
+    embeddings_tensor = _to_tensor(eval_features["embeddings"])
+    if embeddings_tensor.ndim != 2:
         raise ValueError("Embeddings must be a 2D array of shape (N, D)")
 
     if isinstance(manifest_source, pd.DataFrame):
@@ -103,7 +120,7 @@ def compute_msci_single_modality(
     # If the manifest contains more rows than the embeddings (for example when
     # aggregating across splits), align rows using the optional ``row_index``
     # column that preserves the manifest position for each embedding.
-    if len(manifest) != embeddings.shape[0]:
+    if len(manifest) != embeddings_tensor.shape[0]:
         feature_row_indices = _coerce_row_indices(eval_features.get("row_indices"))
         if feature_row_indices is not None and feature_row_indices.max() < len(manifest):
             manifest = manifest.iloc[feature_row_indices].reset_index(drop=True)
@@ -121,19 +138,34 @@ def compute_msci_single_modality(
                 .reset_index(drop=True)
             )
 
-    if len(manifest) != embeddings.shape[0]:
+    if len(manifest) != embeddings_tensor.shape[0]:
         raise ValueError(
             "Manifest row count does not match number of embeddings: "
-            f"{len(manifest)} vs {embeddings.shape[0]}"
+            f"{len(manifest)} vs {embeddings_tensor.shape[0]}"
         )
 
-    available_magnifications = {
-        _canonicalise_magnification(value)
-        for value in manifest[magnification_column].tolist()
-    }
+    manifest = manifest.copy()
+    mag_ints: list[int] = []
+    mag_labels: list[str] = []
+    for value in manifest[magnification_column].tolist():
+        mag_int, label = _coerce_magnification_int(value)
+        if mag_int is None:
+            raise ValueError(
+                f"Magnification '{value}' could not be converted to a numeric level"
+            )
+        mag_ints.append(mag_int)
+        mag_labels.append(label)
+    manifest["__msci_mag_int"] = mag_ints
+
+    available_magnifications = set(mag_ints)
 
     if magnifications is not None:
-        required = [_canonicalise_magnification(m) for m in magnifications]
+        required = []
+        for mag in magnifications:
+            mag_int, _ = _coerce_magnification_int(mag)
+            if mag_int is None:
+                raise ValueError(f"Invalid magnification value: {mag}")
+            required.append(mag_int)
         missing = [m for m in required if m not in available_magnifications]
         if missing:
             filtered_required = [m for m in required if m in available_magnifications]
@@ -150,61 +182,65 @@ def compute_msci_single_modality(
                     f"{missing} and only found {filtered_required} in manifest."
                 )
     else:
-        required = None
+        required = sorted(available_magnifications)
+
+    if len(required) < 2:
+        raise ValueError("MSCI requires at least two magnification levels")
 
     region_groups = manifest.groupby(region_column, sort=False)
-    per_region_vars: list[float] = []
+    per_mag_embeddings: Dict[int, list[torch.Tensor]] = {mag: [] for mag in required}
+    centroid_embeddings: list[torch.Tensor] = []
+    regions_used = 0
 
     for region, group in region_groups:
-        idx = group.index.to_numpy()
-        mags = group[magnification_column].apply(_canonicalise_magnification).tolist()
-        mag_to_embeddings: Dict[str, list[np.ndarray]] = {}
-        for row_idx, mag in zip(idx, mags):
-            mag_to_embeddings.setdefault(mag, []).append(embeddings[row_idx])
+        mag_to_vectors: Dict[int, list[torch.Tensor]] = {}
+        for row in group.itertuples():
+            mag_int = getattr(row, "__msci_mag_int")
+            mag_to_vectors.setdefault(mag_int, []).append(
+                embeddings_tensor[row.Index]
+            )
 
-        if required is not None and not set(required).issubset(mag_to_embeddings):
+        if any(mag not in mag_to_vectors for mag in required):
             continue
 
-        ordered_mags = (
-            required
-            if required is not None
-            else [mag for _, mag in sorted((_prepare_magnification_key(m), m) for m in mag_to_embeddings)]
-        )
-
-        mag_vectors: list[np.ndarray] = []
-        for mag in ordered_mags:
-            vectors = mag_to_embeddings.get(mag)
+        per_mag_means: Dict[int, torch.Tensor] = {}
+        for mag in required:
+            vectors = mag_to_vectors.get(mag)
             if not vectors:
-                continue
-            mean_vec = np.mean(np.stack(vectors, axis=0), axis=0)
-            mag_vectors.append(_normalise_vector(mean_vec))
-
-        if len(mag_vectors) < 2:
+                break
+            stacked = torch.stack(vectors, dim=0)
+            per_mag_means[mag] = stacked.mean(dim=0)
+        if len(per_mag_means) != len(required):
             continue
 
-        centroid = _normalise_vector(np.mean(mag_vectors, axis=0))
-        similarities = np.array([float(np.dot(vec, centroid)) for vec in mag_vectors])
-        variance = float(np.var(similarities, ddof=0))
-        per_region_vars.append(variance)
+        regions_used += 1
+        centroid = torch.stack(list(per_mag_means.values()), dim=0).mean(dim=0)
+        centroid_embeddings.append(centroid)
+        for mag, mean_vec in per_mag_means.items():
+            per_mag_embeddings[mag].append(mean_vec)
 
-    regions_used = len(per_region_vars)
-    regions_total = region_groups.ngroups
     if regions_used == 0:
         raise ValueError(
             "No regions with the required magnifications were found to compute MSCI"
         )
 
-    mean_variance = float(np.mean(per_region_vars))
-    max_variance = 1.0  # cosine similarities lie in [-1, 1]
-    score = 1.0 - min(max(mean_variance / max_variance, 0.0), 1.0)
+    image_embeddings = {
+        mag: torch.stack(vectors, dim=0) for mag, vectors in per_mag_embeddings.items()
+    }
+    text_embeddings = torch.stack(centroid_embeddings, dim=0)
 
+    multimodal_result: MultimodalMSCIResult = compute_multimodal_msci(
+        image_embeddings, text_embeddings, required
+    )
+
+    mean_variance = float(multimodal_result.mean_variance)
     return MSCIResult(
-        score=score,
+        score=float(multimodal_result.msci),
         mean_variance=mean_variance,
-        max_variance=max_variance,
-        per_region_variance=per_region_vars,
+        max_variance=float(multimodal_result.max_variance),
+        per_region_variance=list(multimodal_result.per_region_variance.cpu().numpy()),
         regions_used=regions_used,
-        regions_total=regions_total,
+        regions_total=region_groups.ngroups,
     )
 
 
