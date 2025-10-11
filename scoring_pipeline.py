@@ -45,7 +45,7 @@ def _prepare_magnification_key(value: Any) -> tuple[float, str]:
 
 def compute_msci_single_modality(
     eval_features: Mapping[str, Any],
-    manifest_path: str,
+    manifest_source: str | pd.DataFrame,
     *,
     region_column: str = "region_id",
     magnification_column: str = "magnification",
@@ -71,7 +71,10 @@ def compute_msci_single_modality(
     if embeddings.ndim != 2:
         raise ValueError("Embeddings must be a 2D array of shape (N, D)")
 
-    manifest = pd.read_csv(manifest_path)
+    if isinstance(manifest_source, pd.DataFrame):
+        manifest = manifest_source.reset_index(drop=True)
+    else:
+        manifest = pd.read_csv(manifest_source)
     if len(manifest) != embeddings.shape[0]:
         raise ValueError(
             "Manifest row count does not match number of embeddings: "
@@ -157,33 +160,85 @@ def compute_gabor_scores_from_paths(
     print(f"Gabor Energy Score (Full): {scores['energy']}")
     print(f"Gabor Fisher Score: {scores['fisher']}")
 
+    msci_params: Dict[str, Any] = {}
+    manifest_source: str | pd.DataFrame | None = None
+
     if msci_config:
-        manifest_path = msci_config.get("manifest") or msci_config.get("manifest_path")
-        if manifest_path:
-            result = compute_msci_single_modality(
-                evald,
-                manifest_path,
-                region_column=msci_config.get("region_column", "region_id"),
-                magnification_column=msci_config.get("magnification_column", "magnification"),
-                magnifications=msci_config.get("magnifications"),
+        manifest_candidate = msci_config.get("manifest") or msci_config.get("manifest_path")
+        if manifest_candidate:
+            manifest_source = manifest_candidate
+        msci_params["region_column"] = msci_config.get("region_column", "region_id")
+        msci_params["magnification_column"] = msci_config.get(
+            "magnification_column", "magnification"
+        )
+        if msci_config.get("magnifications") is not None:
+            msci_params["magnifications"] = msci_config.get("magnifications")
+
+    # Attempt to auto-populate manifest information from the feature payload.
+    if manifest_source is None and "region_ids" in evald and "magnifications" in evald:
+        region_column = msci_params.get("region_column") or evald.get(
+            "region_column", "region_id"
+        )
+        magnification_column = msci_params.get("magnification_column") or evald.get(
+            "magnification_column", "magnification"
+        )
+
+        region_values = list(evald["region_ids"])
+        magnification_values = list(evald["magnifications"])
+        if len(region_values) == len(magnification_values) == len(evald["embeddings"]):
+            manifest_df = pd.DataFrame(
+                {
+                    region_column: region_values,
+                    magnification_column: magnification_values,
+                }
             )
-            scores["msci"] = result.score
-            scores["msci_mean_variance"] = result.mean_variance
-            scores["msci_max_variance"] = result.max_variance
-            scores["msci_regions_used"] = result.regions_used
-            scores["msci_regions_total"] = result.regions_total
-            scores["msci_variances"] = list(result.per_region_variance)
+            manifest_source = manifest_df
+            msci_params.setdefault("region_column", region_column)
+            msci_params.setdefault("magnification_column", magnification_column)
+            if "row_indices" in evald:
+                manifest_df["row_index"] = list(evald["row_indices"])
+        else:
             print(
-                "MSCI score: "
-                f"{result.score:.6f} (mean variance={result.mean_variance:.6f}, "
-                f"regions used={result.regions_used}/{result.regions_total})"
+                "Warning: Unable to auto-construct MSCI manifest because region/magnification "
+                "metadata lengths do not match embeddings."
             )
-            if result.per_region_variance:
-                preview = result.per_region_variance[:10]
-                print(
-                    "Per-region variance (first 10 values): "
-                    + np.array2string(np.asarray(preview), separator=", ")
-                )
+
+    if manifest_source is None and "manifest_path" in evald:
+        manifest_source = evald["manifest_path"]
+        msci_params.setdefault("region_column", evald.get("region_column", "region_id"))
+        msci_params.setdefault(
+            "magnification_column", evald.get("magnification_column", "magnification")
+        )
+
+    if manifest_source is not None:
+        result = compute_msci_single_modality(
+            evald,
+            manifest_source,
+            region_column=msci_params.get("region_column", "region_id"),
+            magnification_column=msci_params.get("magnification_column", "magnification"),
+            magnifications=msci_params.get("magnifications"),
+        )
+        scores["msci"] = result.score
+        scores["msci_mean_variance"] = result.mean_variance
+        scores["msci_max_variance"] = result.max_variance
+        scores["msci_regions_used"] = result.regions_used
+        scores["msci_regions_total"] = result.regions_total
+        scores["msci_variances"] = list(result.per_region_variance)
+        print(
+            "MSCI score: "
+            f"{result.score:.6f} (mean variance={result.mean_variance:.6f}, "
+            f"regions used={result.regions_used}/{result.regions_total})"
+        )
+        if result.per_region_variance:
+            preview = result.per_region_variance[:10]
+            print(
+                "Per-region variance (first 10 values): "
+                + np.array2string(np.asarray(preview), separator=", ")
+            )
+    else:
+        print(
+            "MSCI metadata not available; skipping MSCI computation for this model."
+        )
     return scores
 
 
