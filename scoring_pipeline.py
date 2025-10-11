@@ -1,4 +1,5 @@
 import argparse
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Sequence
 
@@ -31,7 +32,16 @@ def _canonicalise_magnification(value: Any) -> str:
     text = str(value).strip().replace("×", "x")
     if text.lower().endswith("x"):
         text = text[:-1]
-    return text
+
+    try:
+        numeric = float(text)
+    except ValueError:
+        return text
+
+    if np.isclose(numeric, round(numeric)):
+        numeric = int(round(numeric))
+
+    return f"{numeric:g}"
 
 
 def _prepare_magnification_key(value: Any) -> tuple[float, str]:
@@ -117,8 +127,28 @@ def compute_msci_single_modality(
             f"{len(manifest)} vs {embeddings.shape[0]}"
         )
 
+    available_magnifications = {
+        _canonicalise_magnification(value)
+        for value in manifest[magnification_column].tolist()
+    }
+
     if magnifications is not None:
         required = [_canonicalise_magnification(m) for m in magnifications]
+        missing = [m for m in required if m not in available_magnifications]
+        if missing:
+            filtered_required = [m for m in required if m in available_magnifications]
+            if len(filtered_required) >= 2:
+                warnings.warn(
+                    "Some requested magnifications are missing from the manifest: "
+                    f"{missing}. Proceeding with available magnifications {filtered_required}.",
+                    RuntimeWarning,
+                )
+                required = filtered_required
+            else:
+                raise ValueError(
+                    "Insufficient magnification coverage to compute MSCI; missing "
+                    f"{missing} and only found {filtered_required} in manifest."
+                )
     else:
         required = None
 
