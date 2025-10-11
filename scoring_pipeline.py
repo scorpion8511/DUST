@@ -74,6 +74,33 @@ def _coerce_magnification_int(value: Any) -> Tuple[int | None, str]:
     return int(numeric), canon
 
 
+def _strip_region_suffix(
+    region_values: Sequence[str], magnification_labels: Sequence[str]
+) -> list[str]:
+    """Attempt to remove magnification suffixes appended to region identifiers.
+
+    Many manifests encode the magnification directly in the region identifier,
+    e.g. ``patch_001_5x``.  When this occurs every magnification appears as a
+    distinct region, preventing MSCI from observing cross-scale consistency.
+    This helper strips a trailing magnification label using common separators
+    (``_``, ``-``, or whitespace) and falls back to the original identifier when
+    no obvious suffix is present.
+    """
+
+    cleaned: list[str] = []
+    for region, label in zip(region_values, magnification_labels):
+        base = region
+        suffixes = [f"_{label}", f"-{label}", f" {label}", label]
+        for suffix in suffixes:
+            if base.endswith(suffix):
+                candidate = base[: -len(suffix)]
+                if candidate:
+                    base = candidate
+                break
+        cleaned.append(base)
+    return cleaned
+
+
 def compute_msci_single_modality(
     eval_features: Mapping[str, Any],
     manifest_source: str | pd.DataFrame,
@@ -156,6 +183,14 @@ def compute_msci_single_modality(
         mag_ints.append(mag_int)
         mag_labels.append(label)
     manifest["__msci_mag_int"] = mag_ints
+    manifest["__msci_mag_label"] = mag_labels
+
+    # Normalise region identifiers by removing trailing magnification tokens so
+    # that regions observed at different scales collapse to a single group.
+    normalised_regions = _strip_region_suffix(
+        manifest[region_column].astype(str).tolist(), mag_labels
+    )
+    manifest["__msci_region"] = normalised_regions
 
     available_magnifications = set(mag_ints)
 
@@ -187,7 +222,7 @@ def compute_msci_single_modality(
     if len(required) < 2:
         raise ValueError("MSCI requires at least two magnification levels")
 
-    region_groups = manifest.groupby(region_column, sort=False)
+    region_groups = manifest.groupby("__msci_region", sort=False)
     per_mag_embeddings: Dict[int, list[torch.Tensor]] = {mag: [] for mag in required}
     centroid_embeddings: list[torch.Tensor] = []
     regions_used = 0
