@@ -313,11 +313,11 @@ def compute_gabor_scores_from_paths(
     # preferring the combined (train+eval) set so that regions with different
     # magnifications across splits are still represented.
     combined_features, combined_manifest = _build_msci_payload((train, evald))
-    if manifest_source is None and combined_manifest is not None:
-        manifest_source = combined_manifest
-        msci_features: Mapping[str, Any] = combined_features or evald
-    else:
-        msci_features = evald
+    msci_features: Mapping[str, Any] = evald
+    if combined_features is not None:
+        msci_features = combined_features
+        if manifest_source is None and combined_manifest is not None:
+            manifest_source = combined_manifest
 
     # Fall back to using only the evaluation payload when a combined manifest is
     # unavailable (for example if metadata is missing).
