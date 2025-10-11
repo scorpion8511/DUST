@@ -75,6 +75,24 @@ def compute_msci_single_modality(
         manifest = manifest_source.reset_index(drop=True)
     else:
         manifest = pd.read_csv(manifest_source)
+
+    # If the manifest contains more rows than the embeddings (for example when
+    # aggregating across splits), align rows using the optional ``row_index``
+    # column that preserves the manifest position for each embedding.
+    if len(manifest) != embeddings.shape[0]:
+        if "row_index" in manifest and "row_indices" in eval_features:
+            row_index_series = pd.Series(eval_features["row_indices"], name="row_index")
+            manifest = (
+                manifest.merge(row_index_series.to_frame(), on="row_index", how="right")
+                .reset_index(drop=True)
+            )
+        elif "__row_index" in manifest and "row_indices" in eval_features:
+            row_index_series = pd.Series(eval_features["row_indices"], name="__row_index")
+            manifest = (
+                manifest.merge(row_index_series.to_frame(), on="__row_index", how="right")
+                .reset_index(drop=True)
+            )
+
     if len(manifest) != embeddings.shape[0]:
         raise ValueError(
             "Manifest row count does not match number of embeddings: "
@@ -163,6 +181,19 @@ def compute_gabor_scores_from_paths(
     msci_params: Dict[str, Any] = {}
     manifest_source: str | pd.DataFrame | None = None
 
+    def _resolve_column(
+        key: str,
+        fallback_payloads: Sequence[Mapping[str, Any]],
+        default: str,
+    ) -> str:
+        if msci_config and key in msci_config and msci_config[key]:
+            return str(msci_config[key])
+        for payload in fallback_payloads:
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return default
+
     if msci_config:
         manifest_candidate = msci_config.get("manifest") or msci_config.get("manifest_path")
         if manifest_candidate:
@@ -174,29 +205,89 @@ def compute_gabor_scores_from_paths(
         if msci_config.get("magnifications") is not None:
             msci_params["magnifications"] = msci_config.get("magnifications")
 
-    # Attempt to auto-populate manifest information from the feature payload.
-    if manifest_source is None and "region_ids" in evald and "magnifications" in evald:
-        region_column = msci_params.get("region_column") or evald.get(
-            "region_column", "region_id"
-        )
-        magnification_column = msci_params.get("magnification_column") or evald.get(
-            "magnification_column", "magnification"
-        )
+    region_column = msci_params.get("region_column") or _resolve_column(
+        "region_column", (train, evald), "region_id"
+    )
+    magnification_column = msci_params.get("magnification_column") or _resolve_column(
+        "magnification_column", (train, evald), "magnification"
+    )
+    msci_params.setdefault("region_column", region_column)
+    msci_params.setdefault("magnification_column", magnification_column)
 
-        region_values = list(evald["region_ids"])
-        magnification_values = list(evald["magnifications"])
-        if len(region_values) == len(magnification_values) == len(evald["embeddings"]):
+    def _build_msci_payload(
+        payloads: Sequence[Mapping[str, Any]]
+    ) -> tuple[Mapping[str, Any] | None, pd.DataFrame | None]:
+        embedding_chunks: list[torch.Tensor] = []
+        manifest_frames: list[pd.DataFrame] = []
+
+        for payload in payloads:
+            if "embeddings" not in payload:
+                continue
+            if "region_ids" not in payload or "magnifications" not in payload:
+                continue
+
+            embeddings_tensor = payload["embeddings"]
+            if isinstance(embeddings_tensor, torch.Tensor):
+                tensor = embeddings_tensor.detach().cpu()
+            else:
+                tensor = torch.as_tensor(embeddings_tensor)
+
+            regions = list(payload["region_ids"])
+            magnifications = list(payload["magnifications"])
+            if len(regions) != len(magnifications) or len(regions) != tensor.shape[0]:
+                print(
+                    "Warning: Skipping MSCI chunk because metadata lengths do not match embeddings."
+                )
+                continue
+
+            frame_data: Dict[str, Sequence[Any]] = {
+                region_column: regions,
+                magnification_column: magnifications,
+            }
+            if "row_indices" in payload:
+                row_indices = list(payload["row_indices"])
+                if len(row_indices) == tensor.shape[0]:
+                    frame_data["row_index"] = row_indices
+            manifest_frames.append(pd.DataFrame(frame_data))
+            embedding_chunks.append(tensor)
+
+        if not embedding_chunks:
+            return None, None
+
+        combined_embeddings = torch.cat(embedding_chunks, dim=0)
+        combined_manifest = pd.concat(manifest_frames, ignore_index=True)
+        feature_payload: Dict[str, Any] = {"embeddings": combined_embeddings}
+        if "row_index" in combined_manifest and not combined_manifest["row_index"].isnull().any():
+            feature_payload["row_indices"] = combined_manifest["row_index"].astype(int).tolist()
+        return feature_payload, combined_manifest
+
+    # Attempt to auto-populate manifest information from the feature payloads,
+    # preferring the combined (train+eval) set so that regions with different
+    # magnifications across splits are still represented.
+    combined_features, combined_manifest = _build_msci_payload((train, evald))
+    if manifest_source is None and combined_manifest is not None:
+        manifest_source = combined_manifest
+        msci_features: Mapping[str, Any] = combined_features or evald
+    else:
+        msci_features = evald
+
+    # Fall back to using only the evaluation payload when a combined manifest is
+    # unavailable (for example if metadata is missing).
+    if manifest_source is None and "region_ids" in evald and "magnifications" in evald:
+        regions = list(evald["region_ids"])
+        magnifications_eval = list(evald["magnifications"])
+        if len(regions) == len(magnifications_eval) == len(evald["embeddings"]):
             manifest_df = pd.DataFrame(
                 {
-                    region_column: region_values,
-                    magnification_column: magnification_values,
+                    region_column: regions,
+                    magnification_column: magnifications_eval,
                 }
             )
-            manifest_source = manifest_df
-            msci_params.setdefault("region_column", region_column)
-            msci_params.setdefault("magnification_column", magnification_column)
             if "row_indices" in evald:
                 manifest_df["row_index"] = list(evald["row_indices"])
+                if isinstance(msci_features, dict):
+                    msci_features.setdefault("row_indices", manifest_df["row_index"].tolist())
+            manifest_source = manifest_df
         else:
             print(
                 "Warning: Unable to auto-construct MSCI manifest because region/magnification "
@@ -212,7 +303,7 @@ def compute_gabor_scores_from_paths(
 
     if manifest_source is not None:
         result = compute_msci_single_modality(
-            evald,
+            msci_features,
             manifest_source,
             region_column=msci_params.get("region_column", "region_id"),
             magnification_column=msci_params.get("magnification_column", "magnification"),
