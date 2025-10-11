@@ -76,11 +76,29 @@ def compute_msci_single_modality(
     else:
         manifest = pd.read_csv(manifest_source)
 
+    def _coerce_row_indices(value: Any) -> np.ndarray | None:
+        if value is None:
+            return None
+        array = np.asarray(value)
+        if array.ndim != 1:
+            return None
+        if array.size != embeddings.shape[0]:
+            return None
+        try:
+            array = array.astype(int, copy=False)
+        except ValueError:
+            return None
+        return array
+
     # If the manifest contains more rows than the embeddings (for example when
     # aggregating across splits), align rows using the optional ``row_index``
     # column that preserves the manifest position for each embedding.
     if len(manifest) != embeddings.shape[0]:
-        if "row_index" in manifest and "row_indices" in eval_features:
+        feature_row_indices = _coerce_row_indices(eval_features.get("row_indices"))
+        if feature_row_indices is not None and feature_row_indices.max() < len(manifest):
+            manifest = manifest.iloc[feature_row_indices].reset_index(drop=True)
+            manifest["row_index"] = feature_row_indices.tolist()
+        elif "row_index" in manifest and "row_indices" in eval_features:
             row_index_series = pd.Series(eval_features["row_indices"], name="row_index")
             manifest = (
                 manifest.merge(row_index_series.to_frame(), on="row_index", how="right")
