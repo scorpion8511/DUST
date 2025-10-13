@@ -204,119 +204,113 @@ def compute_msci_single_modality(
     available_magnifications = set(mag_ints)
 
     if magnifications is not None:
-        required = []
+        requested: list[int] = []
         for mag in magnifications:
             mag_int, _ = _coerce_magnification_int(mag)
             if mag_int is None:
                 raise ValueError(f"Invalid magnification value: {mag}")
-            required.append(mag_int)
-        missing = [m for m in required if m not in available_magnifications]
-        if missing:
-            filtered_required = [m for m in required if m in available_magnifications]
-            if len(filtered_required) >= 2:
-                warnings.warn(
-                    "Some requested magnifications are missing from the manifest: "
-                    f"{missing}. Proceeding with available magnifications {filtered_required}.",
-                    RuntimeWarning,
-                )
-                required = filtered_required
-            else:
-                raise ValueError(
-                    "Insufficient magnification coverage to compute MSCI; missing "
-                    f"{missing} and only found {filtered_required} in manifest."
-                )
+            requested.append(mag_int)
+        if not requested:
+            raise ValueError("No valid magnification levels provided")
+        requested_set = set(requested)
+        missing_global = [m for m in requested if m not in available_magnifications]
+        if missing_global:
+            warnings.warn(
+                "Some requested magnifications are missing from the manifest: "
+                f"{missing_global}. Regions lacking these magnifications will be skipped.",
+                RuntimeWarning,
+            )
     else:
-        required = sorted(available_magnifications)
+        requested = sorted(available_magnifications)
+        requested_set = set(requested)
 
-    if len(required) < 2:
+    if len(requested_set) < 2 and len(available_magnifications) < 2:
         raise ValueError("MSCI requires at least two magnification levels")
 
-    mag_counts = manifest["__msci_mag_int"].value_counts().to_dict()
     grouped_regions = list(manifest.groupby("__msci_region", sort=False))
-
-    def _collect_region_stacks(required_mags: Sequence[int]) -> list[torch.Tensor]:
-        stacks: list[torch.Tensor] = []
-        for _, group in grouped_regions:
-            mag_to_vectors: Dict[int, list[torch.Tensor]] = {}
-            for idx, mag_int in zip(group.index, group["__msci_mag_int"], strict=False):
-                mag_to_vectors.setdefault(int(mag_int), []).append(
-                    embeddings_tensor[int(idx)]
-                )
-
-            if any(mag not in mag_to_vectors for mag in required_mags):
-                continue
-
-            region_vectors: list[torch.Tensor] = []
-            valid = True
-            for mag in required_mags:
-                vectors = mag_to_vectors.get(mag)
-                if not vectors:
-                    valid = False
-                    break
-                stacked = torch.stack(vectors, dim=0)
-                region_vectors.append(stacked.mean(dim=0))
-            if not valid:
-                continue
-
-            stacks.append(torch.stack(region_vectors, dim=0))
-        return stacks
-
-    region_stacks = _collect_region_stacks(required)
-
-    if not region_stacks:
-        # Gradually relax the magnification requirements by dropping the least
-        # represented magnification until at least two levels remain. This
-        # mirrors the behaviour of the multimodal pipeline, which can leverage
-        # cross-split metadata to recover partial coverage.
-        coverage_order = sorted(
-            required,
-            key=lambda m: (mag_counts.get(m, 0), m),
-        )
-        for drop in range(1, len(required)):
-            candidate = [m for m in required if m not in set(coverage_order[:drop])]
-            if len(candidate) < 2:
-                break
-            stacks = _collect_region_stacks(candidate)
-            if stacks:
-                warnings.warn(
-                    "MSCI fallback: insufficient coverage for magnifications "
-                    f"{required}, using {candidate} instead.",
-                    RuntimeWarning,
-                )
-                region_stacks = stacks
-                required = candidate
-                break
-
-    regions_used = len(region_stacks)
-    if regions_used == 0:
-        raise ValueError(
-            "No regions with the required magnifications were found to compute MSCI"
-        )
+    regions_total = len(grouped_regions)
 
     per_region_variances: list[float] = []
-    for stack in region_stacks:
+    per_region_max_variances: list[float] = []
+    per_region_norms: list[float] = []
+    coverage_counts: Dict[int, int] = {}
+
+    for _, group in grouped_regions:
+        mag_to_vectors: Dict[int, list[torch.Tensor]] = {}
+        for idx, mag_int in zip(group.index, group["__msci_mag_int"], strict=False):
+            mag_to_vectors.setdefault(int(mag_int), []).append(
+                embeddings_tensor[int(idx)]
+            )
+
+        available_for_region = [
+            mag for mag in sorted(mag_to_vectors) if (not requested_set or mag in requested_set)
+        ]
+
+        if magnifications is not None:
+            for mag in requested_set:
+                if mag not in mag_to_vectors:
+                    coverage_counts[mag] = coverage_counts.get(mag, 0) + 1
+
+        if len(available_for_region) < 2:
+            continue
+
+        averaged_vectors: list[torch.Tensor] = []
+        for mag in available_for_region:
+            vectors = mag_to_vectors[mag]
+            stacked = torch.stack(vectors, dim=0)
+            averaged_vectors.append(stacked.mean(dim=0))
+
+        stack = torch.stack(averaged_vectors, dim=0)
         normalised = F.normalize(stack, dim=-1)
         centroid = F.normalize(normalised.mean(dim=0), dim=0)
         sims = torch.sum(normalised * centroid, dim=-1)
         mean_sim = sims.mean()
         var = torch.mean((sims - mean_sim) ** 2)
+
+        max_var = _max_variance(len(available_for_region))
         per_region_variances.append(float(var.item()))
+        per_region_max_variances.append(max_var)
+        if max_var > 0:
+            per_region_norms.append(float(var.item() / max_var))
+        else:
+            per_region_norms.append(1.0)
+
+    regions_used = len(per_region_variances)
+
+    if regions_used == 0:
+        missing_info = (
+            f" Requested magnifications: {sorted(requested_set)}" if requested_set else ""
+        )
+        raise ValueError(
+            "No regions with at least two of the required magnifications were found to compute MSCI." +
+            missing_info
+        )
+
+    if magnifications is not None and requested_set:
+        skipped = [mag for mag in requested if coverage_counts.get(mag, 0) == regions_total]
+        if skipped:
+            warnings.warn(
+                "All regions were missing magnifications "
+                f"{skipped}; these levels did not contribute to MSCI.",
+                RuntimeWarning,
+            )
 
     variance_tensor = torch.tensor(per_region_variances, dtype=torch.float32)
     mean_variance = float(variance_tensor.mean().item())
-    max_variance = _max_variance(len(required))
-    if max_variance > 0:
-        score = max(0.0, min(1.0, 1.0 - mean_variance / max_variance))
-    else:
-        score = 0.0
+
+    norm_tensor = torch.tensor(per_region_norms, dtype=torch.float32)
+    mean_normalised_variance = float(norm_tensor.mean().item())
+    score = max(0.0, min(1.0, 1.0 - mean_normalised_variance))
+
+    representative_max = float(np.mean(per_region_max_variances)) if per_region_max_variances else 0.0
 
     return MSCIResult(
         score=score,
         mean_variance=mean_variance,
-        max_variance=max_variance,
+        max_variance=representative_max,
         per_region_variance=per_region_variances,
         regions_used=regions_used,
-        regions_total=len(grouped_regions),
+        regions_total=regions_total,
     )
 
 
