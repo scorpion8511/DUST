@@ -29,8 +29,11 @@ python finetune.py --feature_dir out_dir --device cuda:0
 
 `scoring_pipeline.py` evaluates stored features with Gabor filters and
 computes an energy metric alongside a Fisher discriminant score that
-measures class separation. A `--device` flag selects the compute device and
-an optional `--benchmark` run reports CPU vs. GPU timing:
+measures class separation.  When region identifiers are present in the
+feature files, the script also reports the Model Spatial Consistency Index
+(MSCI), which evaluates how stable confidences remain within each region.
+A `--device` flag selects the compute device and an optional `--benchmark`
+run reports CPU vs. GPU timing:
 
 ```bash
 python scoring_pipeline.py --device cuda:0 --benchmark

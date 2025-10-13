@@ -1,26 +1,68 @@
 import argparse
+import math
+from typing import Any, Dict, Sequence
+
 import numpy as np
 import torch
-from typing import Dict, Sequence
 from scipy.stats import weightedtau
 
 from gabor_eng import compute_gabor_scores, benchmark_runtime
 
 
+REGION_ID_CANDIDATES = (
+    "region_ids",
+    "regions",
+    "region_labels",
+    "slide_ids",
+    "slide_labels",
+    "case_ids",
+    "case_labels",
+)
+
+
+def _select_region_ids(metadata: Dict[str, Any]) -> tuple[str | None, Any]:
+    for key in REGION_ID_CANDIDATES:
+        if key in metadata:
+            return key, metadata[key]
+    return None, None
+
+
 def compute_gabor_scores_from_paths(
     train_features_path: str, eval_features_path: str, device: str = "cpu"
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     train = torch.load(train_features_path, map_location=device)
     evald = torch.load(eval_features_path, map_location=device)
+    region_key, region_ids = _select_region_ids(evald)
+    if region_key:
+        print(f"Found region identifiers under key '{region_key}'.")
+    else:
+        print("No region identifiers found for evaluation set; MSCI may be undefined.")
     scores = compute_gabor_scores(
         train["embeddings"],
         train["labels"],
         evald["embeddings"],
         evald["labels"],
         device=device,
+        eval_region_ids=region_ids,
     )
     print(f"Gabor Energy Score (Full): {scores['energy']}")
     print(f"Gabor Fisher Score: {scores['fisher']}")
+    msci = scores.get("msci")
+    if msci:
+        score = msci.score
+        mean_var = msci.mean_variance
+        regions_used = msci.regions_used
+        total_regions = msci.total_regions
+        if math.isnan(score):
+            print("MSCI score: nan (insufficient region information)")
+        else:
+            print(
+                "MSCI score: "
+                f"{score:.6f} (mean variance={mean_var:.6f}, regions used={regions_used}/{total_regions})"
+            )
+            if msci.per_region_variances:
+                preview = msci.per_region_variances[:10]
+                print(f"Per-region variance (first 10 values): {preview}")
     return scores
 
 
