@@ -5,6 +5,8 @@ from typing import List, Optional
 import torch
 import torch.nn.functional as F
 
+from msci import compute_msci
+
 
 def to_tensor(data, device):
     """Convert input data to a torch.Tensor on the given device."""
@@ -167,11 +169,16 @@ def compute_gabor_scores(
     orientations: Optional[List[float]] = None,
     pca_dim: Optional[int] = 128,
     device: str = "cpu",
+    eval_region_ids: Optional[torch.Tensor] = None,
+    min_region_size: int = 3,
+    min_regions: int = 2,
 ) -> dict:
     train_embeddings = to_tensor(train_embeddings, device)
     eval_embeddings = to_tensor(eval_embeddings, device)
     train_labels = to_tensor(train_labels, device).long()
     eval_labels = to_tensor(eval_labels, device).long()
+    if eval_region_ids is not None:
+        eval_region_ids = to_tensor(eval_region_ids, device)
 
     train_feats = compute_gabor_features(
         train_embeddings, frequencies=frequencies, orientations=orientations, device=device
@@ -195,10 +202,18 @@ def compute_gabor_scores(
     logits = eval_feats @ lda.coef_.T + lda.intercept_
     energy_score = Energy_Score(logits, percent=100, tail="bot", device=device)
     fisher = fisher_score(eval_feats, eval_labels)
+    msci = compute_msci(
+        logits,
+        region_ids=eval_region_ids,
+        device=device,
+        min_region_size=min_region_size,
+        min_regions=min_regions,
+    )
     return {
         "energy": energy_score,
         "fisher": fisher,
         "combined": energy_score + fisher,
+        "msci": msci,
     }
 
 
