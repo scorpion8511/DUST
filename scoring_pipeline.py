@@ -1,4 +1,5 @@
 import argparse
+import re
 import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Sequence, Tuple
@@ -71,30 +72,27 @@ def _coerce_magnification_int(value: Any) -> Tuple[int | None, str]:
     return int(numeric), canon
 
 
-def _strip_region_suffix(
-    region_values: Sequence[str], magnification_labels: Sequence[str]
-) -> list[str]:
-    """Attempt to remove magnification suffixes appended to region identifiers.
+_REGION_SUFFIX_PATTERN = re.compile(r"(?:[_\-\s]?(?:\d+(?:\.\d+)?)(?:x|×)?)+$")
 
-    Many manifests encode the magnification directly in the region identifier,
-    e.g. ``patch_001_5x``.  When this occurs every magnification appears as a
-    distinct region, preventing MSCI from observing cross-scale consistency.
-    This helper strips a trailing magnification label using common separators
-    (``_``, ``-``, or whitespace) and falls back to the original identifier when
-    no obvious suffix is present.
+
+def _strip_region_suffix(region_values: Sequence[str]) -> list[str]:
+    """Remove trailing magnification tokens from region identifiers.
+
+    Some manifests encode magnifications directly in the region identifier (for
+    example ``patch_001_5x_10x``).  MSCI requires consistent region identifiers
+    across magnifications, so this helper trims any trailing sequence of
+    ``_<mag>``/``-<mag>``/`` <mag>`` tokens, optionally suffixed by ``x`` or
+    ``×``.  When no suffix is detected the original identifier is preserved.
     """
 
     cleaned: list[str] = []
-    for region, label in zip(region_values, magnification_labels):
-        base = region
-        suffixes = [f"_{label}", f"-{label}", f" {label}", label]
-        for suffix in suffixes:
-            if base.endswith(suffix):
-                candidate = base[: -len(suffix)]
-                if candidate:
-                    base = candidate
-                break
-        cleaned.append(base)
+    for region in region_values:
+        base = region.strip()
+        candidate = _REGION_SUFFIX_PATTERN.sub("", base)
+        if candidate:
+            cleaned.append(candidate)
+        else:
+            cleaned.append(region)
     return cleaned
 
 
@@ -200,9 +198,7 @@ def compute_msci_single_modality(
 
     # Normalise region identifiers by removing trailing magnification tokens so
     # that regions observed at different scales collapse to a single group.
-    normalised_regions = _strip_region_suffix(
-        manifest[region_column].astype(str).tolist(), mag_labels
-    )
+    normalised_regions = _strip_region_suffix(manifest[region_column].astype(str).tolist())
     manifest["__msci_region"] = normalised_regions
 
     available_magnifications = set(mag_ints)
