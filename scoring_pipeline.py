@@ -157,6 +157,67 @@ def _metadata_from_features(
     return pd.DataFrame(data)
 
 
+def _load_manifest_for_features(
+    manifest_source: str | pd.DataFrame,
+    embeddings: torch.Tensor,
+    features: Mapping[str, Any],
+    region_column: str,
+    magnification_column: str,
+) -> pd.DataFrame | None:
+    """Return a manifest aligned to ``embeddings`` using stored row indices.
+
+    When feature extraction stores ``row_indices`` we can use them to slice the
+    original manifest so that each embedding row is paired with its
+    magnification metadata.  If the manifest already matches the embedding
+    length we simply reset its index for safety.  ``None`` is returned when the
+    manifest cannot be aligned (for example missing columns or incompatible
+    lengths), allowing the caller to fall back to feature-provided metadata.
+    """
+
+    if isinstance(manifest_source, pd.DataFrame):
+        manifest_df = manifest_source.copy()
+    else:
+        manifest_df = pd.read_csv(manifest_source)
+
+    for required in (region_column, magnification_column):
+        if required not in manifest_df.columns:
+            warnings.warn(
+                f"Manifest is missing required column '{required}'; ignoring provided manifest",
+                RuntimeWarning,
+            )
+            return None
+
+    raw_indices = features.get("row_indices")
+    row_indices: np.ndarray | None = None
+    if raw_indices is not None:
+        try:
+            row_indices = np.asarray(raw_indices, dtype=int)
+        except Exception:  # pragma: no cover - defensive
+            row_indices = None
+
+    if row_indices is not None:
+        if row_indices.ndim != 1 or row_indices.size != embeddings.shape[0]:
+            warnings.warn(
+                "Feature row_indices do not align with embeddings; falling back to feature metadata",
+                RuntimeWarning,
+            )
+            row_indices = None
+
+    if row_indices is not None:
+        if (row_indices < 0).any() or (row_indices >= len(manifest_df)).any():
+            raise ValueError("Feature row indices fall outside the manifest range")
+        subset = manifest_df.iloc[row_indices].reset_index(drop=True)
+        subset["row_index"] = row_indices.tolist()
+        return subset
+
+    if len(manifest_df) == embeddings.shape[0]:
+        subset = manifest_df.reset_index(drop=True)
+        subset["row_index"] = list(range(len(subset)))
+        return subset
+
+    return None
+
+
 def compute_msci_single_modality(
     eval_features: Mapping[str, Any],
     manifest_source: str | pd.DataFrame | None,
@@ -183,22 +244,26 @@ def compute_msci_single_modality(
 
     manifest: pd.DataFrame | None = None
 
-    metadata_frame = _metadata_from_features(
-        embeddings_tensor, eval_features, region_column, magnification_column
-    )
-
-    if metadata_frame is not None:
-        manifest = metadata_frame
+    if manifest_source is not None:
+        manifest = _load_manifest_for_features(
+            manifest_source,
+            embeddings_tensor,
+            eval_features,
+            region_column,
+            magnification_column,
+        )
 
     if manifest is None:
-        if manifest_source is None:
-            raise ValueError(
-                "MSCI metadata unavailable; provide a manifest or include region information in the features."
-            )
-        if isinstance(manifest_source, pd.DataFrame):
-            manifest = manifest_source.reset_index(drop=True)
-        else:
-            manifest = pd.read_csv(manifest_source)
+        metadata_frame = _metadata_from_features(
+            embeddings_tensor, eval_features, region_column, magnification_column
+        )
+        if metadata_frame is not None:
+            manifest = metadata_frame
+
+    if manifest is None:
+        raise ValueError(
+            "MSCI metadata unavailable; provide a manifest or include region information in the features."
+        )
 
     def _coerce_row_indices(value: Any) -> np.ndarray | None:
         if value is None:
