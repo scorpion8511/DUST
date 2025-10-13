@@ -112,9 +112,54 @@ def _max_variance(num_magnifications: int) -> float:
     return max_var
 
 
+def _metadata_from_features(
+    embeddings: torch.Tensor,
+    features: Mapping[str, Any],
+    region_column: str,
+    magnification_column: str,
+) -> pd.DataFrame | None:
+    """Construct a metadata frame directly from the feature payload.
+
+    Feature archives produced by :mod:`extract_features` include ``region_ids``
+    and ``magnifications`` arrays that align with the stored embeddings.  When
+    those arrays are present we prefer them over an external manifest so that
+    MSCI always reflects the exact rows used during feature extraction.
+    """
+
+    region_values = features.get("region_ids")
+    magnification_values = features.get("magnifications")
+
+    if region_values is None or magnification_values is None:
+        return None
+
+    try:
+        regions = [str(v) for v in region_values]
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    mags = list(magnification_values)
+    if len(regions) != len(mags) or len(regions) != embeddings.shape[0]:
+        warnings.warn(
+            "Feature metadata lengths do not match embeddings; falling back to manifest",
+            RuntimeWarning,
+        )
+        return None
+
+    data: Dict[str, Sequence[Any]] = {
+        region_column: regions,
+        magnification_column: mags,
+    }
+
+    row_indices = features.get("row_indices")
+    if row_indices is not None and len(row_indices) == embeddings.shape[0]:
+        data["row_index"] = list(row_indices)
+
+    return pd.DataFrame(data)
+
+
 def compute_msci_single_modality(
     eval_features: Mapping[str, Any],
-    manifest_source: str | pd.DataFrame,
+    manifest_source: str | pd.DataFrame | None,
     *,
     region_column: str = "region_id",
     magnification_column: str = "magnification",
@@ -136,10 +181,24 @@ def compute_msci_single_modality(
     if embeddings_tensor.ndim != 2:
         raise ValueError("Embeddings must be a 2D array of shape (N, D)")
 
-    if isinstance(manifest_source, pd.DataFrame):
-        manifest = manifest_source.reset_index(drop=True)
-    else:
-        manifest = pd.read_csv(manifest_source)
+    manifest: pd.DataFrame | None = None
+
+    metadata_frame = _metadata_from_features(
+        embeddings_tensor, eval_features, region_column, magnification_column
+    )
+
+    if metadata_frame is not None:
+        manifest = metadata_frame
+
+    if manifest is None:
+        if manifest_source is None:
+            raise ValueError(
+                "MSCI metadata unavailable; provide a manifest or include region information in the features."
+            )
+        if isinstance(manifest_source, pd.DataFrame):
+            manifest = manifest_source.reset_index(drop=True)
+        else:
+            manifest = pd.read_csv(manifest_source)
 
     def _coerce_row_indices(value: Any) -> np.ndarray | None:
         if value is None:
@@ -413,6 +472,8 @@ def compute_gabor_scores_from_paths(
         feature_payload: Dict[str, Any] = {"embeddings": combined_embeddings}
         if "row_index" in combined_manifest and not combined_manifest["row_index"].isnull().any():
             feature_payload["row_indices"] = combined_manifest["row_index"].astype(int).tolist()
+        feature_payload["region_ids"] = combined_manifest[region_column].astype(str).tolist()
+        feature_payload["magnifications"] = combined_manifest[magnification_column].tolist()
         return feature_payload, combined_manifest
 
     # Attempt to auto-populate manifest information from the feature payloads,
