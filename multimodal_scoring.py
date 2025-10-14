@@ -29,13 +29,24 @@ import math
 import os
 import warnings
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
+from scipy.stats import weightedtau
 
 
 DEFAULT_MAGNIFICATIONS: Sequence[int] = (5, 10, 20)
+
+DEFAULT_GROUND_TRUTH: Dict[str, Dict[str, float]] = {
+    "TCGA": {
+        "plip": 0.59,
+        "musk": 0.65,
+        "conch": 0.58,
+        "pathgen": 0.60,
+    }
+}
 
 
 @dataclass
@@ -424,10 +435,39 @@ def _summarise_for_json(msci_result: MSCIResult, cmi_results: Dict[int, CMILBRes
     }
 
 
+def _compute_weighted_kendall_tau(
+    scores: Dict[str, float], ground_truth: Dict[str, float]
+) -> Optional[float]:
+    """Compute weighted Kendall tau between predictions and ground truth."""
+
+    overlap = [name for name in scores if name in ground_truth]
+    if len(overlap) < 2:
+        return None
+
+    predictions = [scores[name] for name in overlap]
+    truth = [ground_truth[name] for name in overlap]
+    tau, _ = weightedtau(predictions, truth)
+    return float(tau)
+
+
+def _load_ground_truth(path: Optional[str]) -> Dict[str, Dict[str, float]]:
+    if path is None:
+        return DEFAULT_GROUND_TRUTH
+
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    return {
+        str(dataset): {str(model): float(score) for model, score in models.items()}
+        for dataset, models in data.items()
+    }
+
+
 def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     device = torch.device(args.device)
     aggregated_results: Dict[str, object] = {}
     json_payload: Dict[str, object] = {}
+    collected_scores: Dict[str, Dict[str, float]] = {}
 
     for feature_path in args.features:
         print(f"\n=== Evaluating features: {feature_path} ===")
@@ -462,6 +502,12 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
 
         cmi_avg = float(sum(r.cmi_lb for r in cmi_results.values()) / len(cmi_results))
 
+        model_name = Path(feature_path).stem
+        collected_scores[model_name] = {
+            "msci": float(msci_result.msci),
+            "cmi_lb_mean": cmi_avg,
+        }
+
         print("--- MSCI ---")
         print(f"MSCI score: {msci_result.msci:.6f} (normalised by max variance {msci_result.max_variance:.6f})")
         print(f"Mean variance: {msci_result.mean_variance:.6f}")
@@ -489,6 +535,25 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
             json.dump(json_payload, handle, indent=2)
+
+    ground_truth = _load_ground_truth(args.ground_truth)
+    dataset = args.dataset
+    if collected_scores and dataset in ground_truth:
+        gt = ground_truth[dataset]
+        msci_tau = _compute_weighted_kendall_tau(
+            {name: scores["msci"] for name, scores in collected_scores.items()}, gt
+        )
+        if msci_tau is not None:
+            print(
+                f"Kendall tau_w (MSCI vs ground truth) for {dataset}: {msci_tau:.6f}"
+            )
+        cmi_tau = _compute_weighted_kendall_tau(
+            {name: scores["cmi_lb_mean"] for name, scores in collected_scores.items()}, gt
+        )
+        if cmi_tau is not None:
+            print(
+                f"Kendall tau_w (CMI-LB mean vs ground truth) for {dataset}: {cmi_tau:.6f}"
+            )
 
     return aggregated_results
 
@@ -543,6 +608,18 @@ def build_argparser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Optional path to store the metrics as JSON.",
+    )
+    parser.add_argument(
+        "--ground-truth",
+        type=str,
+        default=None,
+        help="Optional JSON file containing ground-truth accuracies for Kendall tau benchmarking.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="TCGA",
+        help="Dataset key used to select ground-truth accuracies.",
     )
     return parser
 
