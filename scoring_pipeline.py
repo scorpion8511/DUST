@@ -356,41 +356,6 @@ def _resolve_manifest(
     return manifest, region_column, magnification_column, resolved_label_column
 
 
-def _extract_labels_from_features(
-    features: Mapping[str, Any],
-    embeddings_tensor: torch.Tensor,
-    *,
-    manifest: pd.DataFrame | None,
-    label_column: str | None,
-) -> np.ndarray:
-    """Return a label array aligned with ``embeddings_tensor``."""
-
-    if manifest is not None:
-        label_candidates = []
-        if label_column:
-            label_candidates.append(label_column)
-        label_candidates.extend(["label", "labels", "subtype"])
-        for column in label_candidates:
-            if column and column in manifest.columns:
-                values = manifest[column].to_numpy()
-                if values.shape[0] == embeddings_tensor.shape[0]:
-                    return values
-
-    preferred_keys = []
-    if label_column:
-        preferred_keys.append(label_column)
-    preferred_keys.extend(["labels", "label", "subtype"])
-
-    for key in preferred_keys:
-        if key and key in features:
-            values = np.asarray(features[key])
-            if values.shape[0] == embeddings_tensor.shape[0]:
-                return values
-
-    raise ValueError(
-        "Label information not available for MSCI computation; include labels in the features or manifest."
-    )
-
 def compute_msci_single_modality(
     train_features: Mapping[str, Any],
     eval_features: Mapping[str, Any],
@@ -401,14 +366,7 @@ def compute_msci_single_modality(
     label_column: str | None = "label",
     magnifications: Sequence[Any] | None = None,
 ) -> MSCIResult:
-    """Compute single-modality MSCI using evaluation embeddings and a manifest.
-
-    The manifest must align with the order of embeddings in ``eval_features`` and
-    contain one row per patch that includes the region identifier and
-    magnification. For each region, embeddings are averaged per magnification,
-    cosine-normalised, and compared against the region centroid to measure
-    cross-scale consistency.
-    """
+    """Compute single-modality MSCI by comparing magnification means per region."""
 
     if "embeddings" not in eval_features:
         raise KeyError("Evaluation features must contain an 'embeddings' entry")
@@ -421,7 +379,7 @@ def compute_msci_single_modality(
     if eval_embeddings.ndim != 2 or train_embeddings.ndim != 2:
         raise ValueError("Embeddings must be 2D arrays of shape (N, D)")
 
-    eval_manifest, region_column, magnification_column, resolved_label_column = _resolve_manifest(
+    eval_manifest, region_column, magnification_column, _ = _resolve_manifest(
         eval_features,
         eval_embeddings,
         manifest_source,
@@ -430,77 +388,59 @@ def compute_msci_single_modality(
         label_column=label_column,
     )
 
-    eval_labels = _extract_labels_from_features(
-        eval_features,
-        eval_embeddings,
-        manifest=eval_manifest,
-        label_column=resolved_label_column or label_column,
-    )
-    eval_label_strings = [str(v) for v in eval_labels]
-    eval_manifest["__msci_label"] = eval_label_strings
-
-    train_manifest: pd.DataFrame | None = None
-    if manifest_source is not None:
+    def _resolve_train_manifest() -> pd.DataFrame | None:
         try:
-            train_manifest, _, _, train_label_column = _resolve_manifest(
+            manifest, _, _, _ = _resolve_manifest(
                 train_features,
                 train_embeddings,
                 manifest_source,
                 region_column,
                 magnification_column,
-                label_column=resolved_label_column or label_column,
+                label_column=label_column,
             )
+            return manifest
         except ValueError:
-            train_manifest = None
-            train_label_column = resolved_label_column or label_column
-    else:
-        train_label_column = resolved_label_column or label_column
-
-    train_labels = _extract_labels_from_features(
-        train_features,
-        train_embeddings,
-        manifest=train_manifest,
-        label_column=train_label_column,
-    )
-    train_label_strings = [str(v) for v in train_labels]
-
-    label_to_indices: Dict[str, list[int]] = {}
-    for idx, label_value in enumerate(train_label_strings):
-        label_to_indices.setdefault(label_value, []).append(idx)
-
-    prototypes: Dict[str, torch.Tensor] = {}
-    for label_value, indices in label_to_indices.items():
-        if not indices:
-            continue
-        index_tensor = torch.tensor(indices, dtype=torch.long)
-        vectors = train_embeddings.index_select(0, index_tensor)
-        prototype = F.normalize(vectors.mean(dim=0), dim=0)
-        prototypes[label_value] = prototype
-
-    if not prototypes:
-        raise ValueError("Unable to build label prototypes for MSCI computation")
-
-    mag_ints: list[int] = []
-    mag_labels: list[str] = []
-    for value in eval_manifest[magnification_column].tolist():
-        mag_int, label = _coerce_magnification_int(value)
-        if mag_int is None:
-            raise ValueError(
-                f"Magnification '{value}' could not be converted to a numeric level"
+            manifest = _metadata_from_features(
+                train_embeddings,
+                train_features,
+                region_column,
+                magnification_column,
+                label_column=label_column,
             )
-        mag_ints.append(mag_int)
-        mag_labels.append(label)
-    eval_manifest["__msci_mag_int"] = mag_ints
-    eval_manifest["__msci_mag_label"] = mag_labels
+            if manifest is not None and len(manifest) == train_embeddings.shape[0]:
+                return manifest
+            return None
 
-    # Normalise region identifiers by removing trailing magnification tokens so
-    # that regions observed at different scales collapse to a single group.
-    normalised_regions = _strip_region_suffix(
-        eval_manifest[region_column].astype(str).tolist()
-    )
-    eval_manifest["__msci_region"] = normalised_regions
+    train_manifest = _resolve_train_manifest()
 
-    available_magnifications = set(mag_ints)
+    region_embeddings: Dict[str, Dict[int, list[torch.Tensor]]] = {}
+    available_magnifications: set[int] = set()
+
+    def _accumulate(manifest: pd.DataFrame | None, embeddings: torch.Tensor) -> None:
+        if manifest is None or embeddings.numel() == 0:
+            return
+        if len(manifest) != embeddings.shape[0]:
+            raise ValueError(
+                "Manifest row count does not match number of embeddings: "
+                f"{len(manifest)} vs {embeddings.shape[0]}"
+            )
+        regions = _strip_region_suffix(manifest[region_column].astype(str).tolist())
+        mags_raw = manifest[magnification_column].tolist()
+        if len(regions) != len(mags_raw):
+            raise ValueError("Manifest region and magnification columns are misaligned")
+        for idx, (region, mag_value) in enumerate(zip(regions, mags_raw)):
+            mag_int, _ = _coerce_magnification_int(mag_value)
+            if mag_int is None:
+                continue
+            vector = embeddings[idx]
+            region_embeddings.setdefault(region, {}).setdefault(mag_int, []).append(vector)
+            available_magnifications.add(mag_int)
+
+    _accumulate(train_manifest, train_embeddings)
+    _accumulate(eval_manifest, eval_embeddings)
+
+    if not region_embeddings:
+        raise ValueError("No region information available to compute MSCI")
 
     if magnifications is not None:
         requested: list[int] = []
@@ -515,7 +455,7 @@ def compute_msci_single_modality(
         missing_global = [m for m in requested if m not in available_magnifications]
         if missing_global:
             warnings.warn(
-                "Some requested magnifications are missing from the manifest: "
+                "Some requested magnifications are missing from the combined metadata: "
                 f"{missing_global}. Regions lacking these magnifications will be skipped.",
                 RuntimeWarning,
             )
@@ -523,64 +463,55 @@ def compute_msci_single_modality(
         requested = sorted(available_magnifications)
         requested_set = set(requested)
 
-    if len(requested_set) < 2 and len(available_magnifications) < 2:
+    if len(requested_set) < 2:
         raise ValueError("MSCI requires at least two magnification levels")
 
-    grouped_regions = list(eval_manifest.groupby("__msci_region", sort=False))
-    regions_total = len(grouped_regions)
-
+    coverage_counts: Dict[int, int] = {mag: 0 for mag in requested_set}
     per_region_variances: list[float] = []
     per_region_max_variances: list[float] = []
     per_region_norms: list[float] = []
-    coverage_counts: Dict[int, int] = {}
 
-    for _, group in grouped_regions:
-        label_values = list({str(val) for val in group["__msci_label"].tolist()})
-        if len(label_values) != 1:
-            continue
-        label_key = label_values[0]
-        prototype = prototypes.get(label_key)
-        if prototype is None:
-            continue
+    regions_total = len(region_embeddings)
 
-        mag_to_vectors: Dict[int, list[torch.Tensor]] = {}
-        for idx, mag_int in zip(group.index, group["__msci_mag_int"], strict=False):
-            mag_to_vectors.setdefault(int(mag_int), []).append(
-                eval_embeddings[int(idx)]
-            )
-
-        available_for_region = [
-            mag for mag in sorted(mag_to_vectors) if (not requested_set or mag in requested_set)
-        ]
-
+    for region, mag_dict in region_embeddings.items():
         if magnifications is not None:
             for mag in requested_set:
-                if mag not in mag_to_vectors:
-                    coverage_counts[mag] = coverage_counts.get(mag, 0) + 1
+                if mag not in mag_dict:
+                    coverage_counts[mag] += 1
+
+        available_for_region = [
+            mag for mag in sorted(mag_dict) if (not requested_set or mag in requested_set)
+        ]
 
         if len(available_for_region) < 2:
             continue
 
         averaged_vectors: list[torch.Tensor] = []
         for mag in available_for_region:
-            vectors = mag_to_vectors[mag]
+            vectors = mag_dict[mag]
             stacked = torch.stack(vectors, dim=0)
             averaged_vectors.append(stacked.mean(dim=0))
 
         stack = torch.stack(averaged_vectors, dim=0)
-        normalised = F.normalize(stack, dim=-1)
-        prototype = prototype.to(normalised.device, dtype=normalised.dtype)
-        sims = torch.matmul(normalised, prototype)
+        stack = F.normalize(stack, dim=-1)
+        centroid_vec = stack.mean(dim=0)
+        centroid_norm = torch.norm(centroid_vec)
+        if torch.isnan(centroid_norm) or float(centroid_norm.item()) == 0.0:
+            continue
+        centroid = centroid_vec / centroid_norm
+
+        sims = torch.matmul(stack, centroid)
         mean_sim = sims.mean()
         var = torch.mean((sims - mean_sim) ** 2)
 
+        var_value = float(var.item())
+        per_region_variances.append(var_value)
         max_var = _max_variance(len(available_for_region))
-        per_region_variances.append(float(var.item()))
         per_region_max_variances.append(max_var)
         if max_var > 0:
-            per_region_norms.append(float(var.item() / max_var))
+            per_region_norms.append(var_value / max_var)
         else:
-            per_region_norms.append(1.0)
+            per_region_norms.append(0.0)
 
     regions_used = len(per_region_variances)
 
@@ -593,8 +524,8 @@ def compute_msci_single_modality(
             missing_info
         )
 
-    if magnifications is not None and requested_set:
-        skipped = [mag for mag in requested if coverage_counts.get(mag, 0) == regions_total]
+    if magnifications is not None:
+        skipped = [mag for mag, count in coverage_counts.items() if count == regions_total]
         if skipped:
             warnings.warn(
                 "All regions were missing magnifications "
@@ -606,7 +537,7 @@ def compute_msci_single_modality(
     mean_variance = float(variance_tensor.mean().item())
 
     norm_tensor = torch.tensor(per_region_norms, dtype=torch.float32)
-    mean_normalised_variance = float(norm_tensor.mean().item())
+    mean_normalised_variance = float(norm_tensor.mean().item()) if len(per_region_norms) else 0.0
     score = max(0.0, min(1.0, 1.0 - mean_normalised_variance))
 
     representative_max = float(np.mean(per_region_max_variances)) if per_region_max_variances else 0.0
