@@ -48,6 +48,15 @@ DEFAULT_GROUND_TRUTH: Dict[str, Dict[str, float]] = {
     }
 }
 
+DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, str]] = {
+    "TCGA": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features/plip_features02.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features/musk_features02.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features/conch_features02.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features/pathgen_features02.pth",
+    }
+}
+
 
 @dataclass
 class MSCIResult:
@@ -469,8 +478,27 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     json_payload: Dict[str, object] = {}
     collected_scores: Dict[str, Dict[str, float]] = {}
 
-    for feature_path in args.features:
-        print(f"\n=== Evaluating features: {feature_path} ===")
+    dataset_map = DEFAULT_DATASET_MODEL_PATHS.get(args.dataset, {})
+    entries: list[tuple[str, str]] = []
+
+    if args.features:
+        reverse_lookup = {
+            str(Path(path).expanduser().resolve()): model_name
+            for model_name, path in dataset_map.items()
+        }
+        for feature_path in args.features:
+            resolved = str(Path(feature_path).expanduser().resolve())
+            model_name = reverse_lookup.get(resolved, Path(feature_path).stem)
+            entries.append((model_name, feature_path))
+    else:
+        if not dataset_map:
+            raise ValueError(
+                "No feature paths provided and no default dataset entries available for the requested dataset."
+            )
+        entries.extend(dataset_map.items())
+
+    for model_name, feature_path in entries:
+        print(f"\n=== Evaluating {model_name}: {feature_path} ===")
         (
             image_embeddings,
             text_embeddings,
@@ -502,7 +530,6 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
 
         cmi_avg = float(sum(r.cmi_lb for r in cmi_results.values()) / len(cmi_results))
 
-        model_name = Path(feature_path).stem
         collected_scores[model_name] = {
             "msci": float(msci_result.msci),
             "cmi_lb_mean": cmi_avg,
@@ -563,8 +590,12 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "features",
         type=str,
-        nargs="+",
-        help="One or more multimodal feature .pth files to evaluate.",
+        nargs="*",
+        default=None,
+        help=(
+            "Optional list of multimodal feature .pth files to evaluate. "
+            "If omitted, built-in dataset paths are used when available."
+        ),
     )
     parser.add_argument(
         "--device",
