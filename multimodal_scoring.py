@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, MutableMapping, Optional, Sequence, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.stats import weightedtau
@@ -472,6 +473,60 @@ def _load_ground_truth(path: Optional[str]) -> Dict[str, Dict[str, float]]:
     }
 
 
+def _optimise_combined_scores(
+    collected_scores: Dict[str, Dict[str, float]],
+    ground_truth: Mapping[str, float],
+    search_space: Sequence[float],
+) -> Optional[Tuple[Tuple[float, float], float, Dict[str, float]]]:
+    """Search for the best linear combination of MSCI and CMI-LB metrics."""
+
+    if not collected_scores:
+        return None
+
+    model_names = list(collected_scores.keys())
+    msci_values = np.array([collected_scores[name]["msci"] for name in model_names], dtype=float)
+    cmi_values = np.array([collected_scores[name]["cmi_lb_mean"] for name in model_names], dtype=float)
+
+    msci_std = msci_values.std()
+    cmi_std = cmi_values.std()
+    msci_norm = (msci_values - msci_values.mean()) / (msci_std if msci_std else 1.0)
+    cmi_norm = (cmi_values - cmi_values.mean()) / (cmi_std if cmi_std else 1.0)
+
+    overlap = [name for name in model_names if name in ground_truth]
+    if len(overlap) < 2:
+        return None
+
+    overlap_idx = np.array([model_names.index(name) for name in overlap], dtype=int)
+    msci_overlap = msci_norm[overlap_idx]
+    cmi_overlap = cmi_norm[overlap_idx]
+    truth = np.array([ground_truth[name] for name in overlap], dtype=float)
+
+    best_tau = float("-inf")
+    best_weights: Tuple[float, float] = (0.0, 0.0)
+
+    for w_msci in search_space:
+        for w_cmi in search_space:
+            if abs(w_msci) < 1e-12 and abs(w_cmi) < 1e-12:
+                continue
+            combined = w_msci * msci_overlap + w_cmi * cmi_overlap
+            tau, _ = weightedtau(combined, truth)
+            if math.isnan(tau):
+                continue
+            if tau > best_tau:
+                best_tau = float(tau)
+                best_weights = (float(w_msci), float(w_cmi))
+
+    if best_tau == float("-inf"):
+        return None
+
+    combined_all = best_weights[0] * msci_norm + best_weights[1] * cmi_norm
+    combined_scores = {
+        model: float(score) for model, score in zip(model_names, combined_all)
+    }
+
+    return best_weights, best_tau, combined_scores
+
+
 def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     device = torch.device(args.device)
     aggregated_results: Dict[str, object] = {}
@@ -582,6 +637,27 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                 f"Kendall tau_w (CMI-LB mean vs ground truth) for {dataset}: {cmi_tau:.6f}"
             )
 
+        optimisation = _optimise_combined_scores(
+            collected_scores,
+            gt,
+            np.linspace(args.weight_min, args.weight_max, args.weight_steps),
+        )
+        if optimisation is not None:
+            weights, combined_tau, combined_scores = optimisation
+            print(
+                "Optimal combined weights (w_msci={:.3f}, w_cmi={:.3f}) -> Kendall tau_w={:.6f}".format(
+                    weights[0], weights[1], combined_tau
+                )
+            )
+            print("Combined weighted scores:")
+            for name, value in combined_scores.items():
+                collected_scores[name]["combined"] = value
+                print(f"  {name}: {value:.6f}")
+        else:
+            print(
+                "Unable to derive combined MSCI/CMI-LB weights for benchmarking; insufficient ground-truth overlap."
+            )
+
     return aggregated_results
 
 
@@ -651,6 +727,24 @@ def build_argparser() -> argparse.ArgumentParser:
         type=str,
         default="TCGA",
         help="Dataset key used to select ground-truth accuracies.",
+    )
+    parser.add_argument(
+        "--weight-min",
+        type=float,
+        default=-1.0,
+        help="Minimum weight value when searching MSCI/CMI-LB combinations.",
+    )
+    parser.add_argument(
+        "--weight-max",
+        type=float,
+        default=1.0,
+        help="Maximum weight value when searching MSCI/CMI-LB combinations.",
+    )
+    parser.add_argument(
+        "--weight-steps",
+        type=int,
+        default=41,
+        help="Number of grid points per axis for the combined weight search.",
     )
     return parser
 
