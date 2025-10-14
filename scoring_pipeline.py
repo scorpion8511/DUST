@@ -89,7 +89,10 @@ def _coerce_magnification_int(value: Any) -> Tuple[int | None, str]:
     return int(numeric), canon
 
 
-_REGION_SUFFIX_PATTERN = re.compile(r"(?:[_\-\s]?(?:\d+(?:\.\d+)?)(?:x|×)?)+$")
+# Match one-or-more trailing magnification tokens such as ``_5x`` or ``-20×``.
+# The ``x``/``×`` suffix is mandatory so identifiers like ``patch_0`` remain
+# untouched while strings like ``patch_0_5x`` collapse to ``patch_0``.
+_REGION_SUFFIX_PATTERN = re.compile(r"(?:[_\-\s]?\d+(?:\.\d+)?(?:x|×))+$")
 
 
 def _strip_region_suffix(region_values: Sequence[str]) -> list[str]:
