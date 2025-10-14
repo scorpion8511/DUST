@@ -904,43 +904,64 @@ def compute_scores_for_all_datasets(
     return dataset_results
 
 
+def _expand_weights(values: Sequence[float], target: int) -> Tuple[float, ...]:
+    padded = list(values) + [0.0] * (target - len(values))
+    return tuple(padded[:target])
+
+
 def normalize_and_combine_scores(
     dataset_results: Dict[str, Dict[str, Dict[str, float]]],
-    weights: Sequence[float] = (0.5, 0.5),
-    signs: Sequence[float] = (1.0, 1.0),
+    weights: Sequence[float] = (1 / 3, 1 / 3, 1 / 3),
+    signs: Sequence[float] = (1.0, 1.0, 1.0),
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     """Normalize metrics within each dataset and form a weighted sum.
 
     Parameters
     ----------
     dataset_results:
-        Raw ``energy`` and ``histogram`` scores per dataset and model.
+        Raw metric dictionary containing at least ``energy`` and ``histogram``
+        scores per dataset and model. When ``msci`` is present for every model
+        in a dataset, it is included automatically.
     weights:
-        Tuple giving the weight for normalized energy and histogram scores
-        respectively when forming the combined score.
+        Tuple giving the weight for the normalized energy, histogram, and MSCI
+        scores respectively when forming the combined score. Fewer entries are
+        padded with zeros.
     signs:
-        Tuple of orientation multipliers for energy and histogram metrics. A
-        negative value flips the metric so that higher values correspond to
-        better accuracy.
+        Tuple of orientation multipliers for the energy, histogram, and MSCI
+        metrics. A negative value flips the metric so that higher values
+        correspond to better accuracy.
     """
 
-    w_energy, w_hist = weights
-    s_energy, s_hist = signs
+    w_energy, w_hist, w_msci = _expand_weights(weights, 3)
+    s_energy, s_hist, s_msci = _expand_weights(signs, 3)
     combined: Dict[str, Dict[str, Dict[str, float]]] = {}
     for dataset, models in dataset_results.items():
         energies = np.array([s["energy"] for s in models.values()])
         hist_scores = np.array([s["histogram"] for s in models.values()])
+        msci_available = all("msci" in s for s in models.values())
+        if msci_available:
+            msci_scores = np.array([s["msci"] for s in models.values()])
+        else:
+            msci_scores = None
         e_mean, e_std = energies.mean(), energies.std() or 1.0
         h_mean, h_std = hist_scores.mean(), hist_scores.std() or 1.0
+        if msci_scores is not None:
+            m_mean, m_std = msci_scores.mean(), msci_scores.std() or 1.0
 
         combined[dataset] = {}
         for model, scores in models.items():
             energy_norm = s_energy * (-((scores["energy"] - e_mean) / e_std))
             hist_norm = s_hist * ((scores["histogram"] - h_mean) / h_std)
-            combined_score = w_energy * energy_norm + w_hist * hist_norm
+            msci_norm = 0.0
+            if msci_scores is not None:
+                msci_norm = s_msci * ((scores["msci"] - m_mean) / m_std)
+            combined_score = (
+                w_energy * energy_norm + w_hist * hist_norm + w_msci * msci_norm
+            )
             combined[dataset][model] = {
                 "energy": scores["energy"],
                 "histogram": scores["histogram"],
+                **({"msci": scores["msci"]} if "msci" in scores else {}),
                 "combined": combined_score,
             }
     return combined
@@ -950,9 +971,9 @@ def derive_optimal_weights(
     dataset_results: Dict[str, Dict[str, Dict[str, float]]],
     ground_truth: Dict[str, Dict[str, float]],
     search_space: Sequence[float] = np.linspace(-1.0, 1.0, 41),
-    default: Sequence[float] = (0.5, 0.5),
-) -> Sequence[float]:
-    """Grid-search a single pair of metric weights across datasets.
+    default: Sequence[float] = (1 / 3, 1 / 3, 1 / 3),
+) -> Tuple[Sequence[float], Sequence[float]]:
+    """Grid-search a single set of metric weights across datasets.
 
     Metrics are normalized per dataset, their orientations are aligned with the
     ground-truth accuracies, and then a grid search optimizes the mean Kendall
@@ -961,34 +982,57 @@ def derive_optimal_weights(
 
     normed: Dict[str, Dict[str, Sequence[float]]] = {}
     e_all, h_all, acc_all = [], [], []
+    m_all_vals: list[float] = []
+    m_all_accs: list[float] = []
 
     for dataset, models in dataset_results.items():
         if dataset not in ground_truth:
             continue
         energies = []
         hist_scores = []
+        msci_scores = []
         accs = []
         names = []
         for model, scores in models.items():
             if model in ground_truth[dataset]:
                 energies.append(scores["energy"])
                 hist_scores.append(scores["histogram"])
+                if "msci" in scores:
+                    msci_scores.append(scores["msci"])
+                else:
+                    msci_scores.append(np.nan)
                 accs.append(ground_truth[dataset][model])
                 names.append(model)
         if not energies:
             continue
         energies = np.asarray(energies)
         hist_scores = np.asarray(hist_scores)
+        msci_scores = np.asarray(msci_scores)
         accs = np.asarray(accs)
         e_norm = -((energies - energies.mean()) / (energies.std() or 1.0))
         h_norm = (hist_scores - hist_scores.mean()) / (hist_scores.std() or 1.0)
-        normed[dataset] = {m: (e, h, a) for m, e, h, a in zip(names, e_norm, h_norm, accs)}
+        if np.isnan(msci_scores).all():
+            m_norm = np.full_like(e_norm, np.nan)
+        else:
+            valid = ~np.isnan(msci_scores)
+            mean = msci_scores[valid].mean() if valid.any() else 0.0
+            std = msci_scores[valid].std() or 1.0 if valid.any() else 1.0
+            m_norm = np.empty_like(e_norm)
+            m_norm[:] = np.nan
+            if valid.any():
+                m_norm[valid] = (msci_scores[valid] - mean) / std
+        normed[dataset] = {}
+        for name, e_val, h_val, m_val, acc in zip(names, e_norm, h_norm, m_norm, accs):
+            normed[dataset][name] = (e_val, h_val, m_val, acc)
+            if not np.isnan(m_val):
+                m_all_vals.append(float(m_val))
+                m_all_accs.append(float(acc))
         e_all.extend(e_norm)
         h_all.extend(h_norm)
         acc_all.extend(accs)
 
     if not e_all:
-        return default, (1.0, 1.0)
+        return default, (1.0, 1.0, 1.0)
 
     e_all = np.asarray(e_all)
     h_all = np.asarray(h_all)
@@ -997,31 +1041,47 @@ def derive_optimal_weights(
     h_tau, _ = weightedtau(h_all, acc_all)
     e_sign = 1.0 if e_tau >= 0 else -1.0
     h_sign = 1.0 if h_tau >= 0 else -1.0
+    if m_all_vals:
+        m_arr = np.asarray(m_all_vals)
+        acc_arr = np.asarray(m_all_accs)
+        m_tau, _ = weightedtau(m_arr, acc_arr)
+        m_sign = 1.0 if m_tau >= 0 else -1.0
+    else:
+        m_sign = 1.0
 
     for dataset in normed:
         for model in normed[dataset]:
-            e, h, a = normed[dataset][model]
-            normed[dataset][model] = (e_sign * e, h_sign * h, a)
+            e, h, m_val, a = normed[dataset][model]
+            normed[dataset][model] = (
+                e_sign * e,
+                h_sign * h,
+                m_sign * m_val if not np.isnan(m_val) else np.nan,
+                a,
+            )
 
     best_tau = -2.0
-    best_w = default
+    best_w = _expand_weights(default, 3)
     for w_energy in search_space:
         for w_hist in search_space:
-            taus = []
-            for dataset, models in normed.items():
-                preds = []
-                truth = []
-                for e, h, a in models.values():
-                    preds.append(w_energy * e + w_hist * h)
-                    truth.append(a)
-                tau, _ = weightedtau(preds, truth)
-                taus.append(tau)
-            mean_tau = float(np.mean(taus)) if taus else -2.0
-            if mean_tau > best_tau:
-                best_tau = mean_tau
-                best_w = (float(w_energy), float(w_hist))
+            for w_msci in search_space:
+                taus = []
+                for dataset, models in normed.items():
+                    preds = []
+                    truth = []
+                    for e, h, m_val, a in models.values():
+                        if np.isnan(m_val):
+                            preds.append(w_energy * e + w_hist * h)
+                        else:
+                            preds.append(w_energy * e + w_hist * h + w_msci * m_val)
+                        truth.append(a)
+                    tau, _ = weightedtau(preds, truth)
+                    taus.append(tau)
+                mean_tau = float(np.mean(taus)) if taus else -2.0
+                if mean_tau > best_tau:
+                    best_tau = mean_tau
+                    best_w = (float(w_energy), float(w_hist), float(w_msci))
     print(f"Optimized global weights: {best_w} (tau={best_tau})")
-    return best_w, (e_sign, h_sign)
+    return best_w, (e_sign, h_sign, m_sign)
 
 
 def compute_weighted_kendall_tau(
