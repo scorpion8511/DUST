@@ -10,7 +10,11 @@ import torch
 import torch.nn.functional as F
 from scipy.stats import weightedtau
 
-from gabor_eng import compute_gabor_scores, benchmark_runtime
+from gabor_eng import (
+    compute_gabor_scores,
+    benchmark_runtime,
+    fisher_score as _lda_fisher_score,
+)
 
 
 @dataclass
@@ -59,6 +63,31 @@ def _to_tensor(value: Any) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
         return value.detach().cpu().to(torch.float32)
     return torch.as_tensor(value, dtype=torch.float32)
+
+
+def _compute_direct_fisher(
+    embeddings: Any, labels: Any, device: str = "cpu"
+) -> float:
+    """Compute Fisher score directly from the provided embeddings.
+
+    The helper mirrors the Fisher discriminant ratio implementation in
+    :mod:`gabor_eng` but operates on the raw feature space instead of the
+    intermediate Gabor-transformed representation.
+    """
+
+    feats = _to_tensor(embeddings).to(device)
+    labs = torch.as_tensor(labels, device=device)
+    if labs.ndim > 1:
+        labs = labs.squeeze()
+    labs = labs.long()
+
+    if feats.ndim != 2:
+        raise ValueError(
+            f"Expected rank-2 embeddings for Fisher computation, got shape {tuple(feats.shape)}"
+        )
+
+    feats = feats - feats.mean(dim=0, keepdim=True)
+    return float(_lda_fisher_score(feats, labs))
 
 
 def _coerce_magnification_int(value: Any) -> Tuple[int | None, str]:
@@ -568,7 +597,12 @@ def compute_gabor_scores_from_paths(
         device=device,
     )
     print(f"Gabor Energy Score (Full): {scores['energy']}")
-    print(f"Fisher Score: {scores['fisher']}")
+    direct_fisher = _compute_direct_fisher(
+        evald["embeddings"], evald["labels"], device=device
+    )
+    scores["fisher"] = direct_fisher
+    scores["combined"] = scores["energy"] + direct_fisher
+    print(f"Fisher Score: {direct_fisher}")
 
     msci_params: Dict[str, Any] = {}
     manifest_source: str | pd.DataFrame | None = None
