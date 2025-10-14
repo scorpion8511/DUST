@@ -568,7 +568,7 @@ def compute_gabor_scores_from_paths(
         device=device,
     )
     print(f"Gabor Energy Score (Full): {scores['energy']}")
-    print(f"Gabor Fisher Score: {scores['fisher']}")
+    print(f"Fisher Score: {scores['fisher']}")
 
     msci_params: Dict[str, Any] = {}
     manifest_source: str | pd.DataFrame | None = None
