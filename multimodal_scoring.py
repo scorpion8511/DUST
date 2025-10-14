@@ -26,8 +26,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import warnings
 from dataclasses import dataclass
-from typing import Dict, Iterable, Mapping, MutableMapping, Sequence, Tuple
+from typing import Dict, Iterable, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -90,7 +92,7 @@ def _ensure_magnification_dict(
 
 def load_multimodal_embeddings(
     path: str, device: torch.device
-) -> tuple[Dict[int, torch.Tensor], torch.Tensor]:
+) -> tuple[Dict[int, torch.Tensor], torch.Tensor, Mapping[str, object], Optional[Sequence[int]]]:
     """Load multimodal embeddings from ``path``.
 
     Parameters
@@ -110,7 +112,111 @@ def load_multimodal_embeddings(
     images = _ensure_magnification_dict(data["image_embeddings"], device)
     texts = torch.as_tensor(data["text_embeddings"], device=device, dtype=torch.float32)
 
-    return images, texts
+    metadata = data.get("metadata") if isinstance(data, Mapping) else None
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+
+    stored_magnifications: Optional[Sequence[int]] = None
+    raw_mags = data.get("magnifications") if isinstance(data, Mapping) else None
+    if isinstance(raw_mags, Sequence):
+        try:
+            stored_magnifications = [int(mag) for mag in raw_mags]
+        except (TypeError, ValueError):
+            warnings.warn(
+                "Encountered non-integer magnification identifiers in metadata; falling back to detected keys.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            stored_magnifications = None
+
+    return images, texts, metadata, stored_magnifications
+
+
+def _normalise_patch_name(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    base = os.path.basename(str(value))
+    root, _ = os.path.splitext(base)
+    return root or base
+
+
+def _candidate_region_tokens(region_id: str, csv_map: Mapping[object, Sequence[object]]) -> Sequence[str]:
+    candidates = {str(region_id)}
+    for key, values in csv_map.items():
+        if str(key) == str(region_id):
+            for item in values:
+                candidates.add(str(item))
+    return list(candidates)
+
+
+def _validate_alignment(
+    metadata: Mapping[str, object],
+    image_embeddings: Mapping[int, torch.Tensor],
+    text_embeddings: torch.Tensor,
+) -> None:
+    region_ids = metadata.get("region_ids") if metadata else None
+    patches = metadata.get("patches") if metadata else None
+    csv_map = metadata.get("csv_region_mapping") if metadata else None
+
+    if not isinstance(region_ids, Sequence):
+        return
+
+    if text_embeddings.shape[0] != len(region_ids):
+        warnings.warn(
+            "Metadata region count does not match embedding rows; skipping alignment validation.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+
+    patch_lookup: Dict[int, Sequence[Optional[str]]] = {}
+    if isinstance(patches, Mapping):
+        for key, value in patches.items():
+            try:
+                mag = int(key)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, Sequence):
+                patch_lookup[mag] = [
+                    _normalise_patch_name(item) if item is not None else None for item in value
+                ]
+
+    csv_mapping = csv_map if isinstance(csv_map, Mapping) else {}
+
+    for mag, tensor in image_embeddings.items():
+        if tensor.shape[0] != len(region_ids):
+            warnings.warn(
+                f"Magnification {mag} has {tensor.shape[0]} embeddings but metadata lists {len(region_ids)} regions;"
+                " skipping patch-name validation for this magnification.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
+
+        patches_for_mag = patch_lookup.get(mag)
+        if not patches_for_mag:
+            continue
+
+        if len(patches_for_mag) != len(region_ids):
+            warnings.warn(
+                f"Magnification {mag} patch metadata has length {len(patches_for_mag)} but expected {len(region_ids)};"
+                " skipping validation for this magnification.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
+
+        for idx, region_id in enumerate(region_ids):
+            patch_name = patches_for_mag[idx]
+            if patch_name is None:
+                continue
+            candidates = _candidate_region_tokens(str(region_id), csv_mapping if isinstance(csv_mapping, Mapping) else {})
+            if not any(token and token in patch_name for token in candidates):
+                warnings.warn(
+                    f"Patch '{patch_name}' (magnification {mag}) does not appear to match region '{region_id}'.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
 
 def _max_variance(num_magnifications: int) -> float:
@@ -325,9 +431,24 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
 
     for feature_path in args.features:
         print(f"\n=== Evaluating features: {feature_path} ===")
-        image_embeddings, text_embeddings = load_multimodal_embeddings(feature_path, device)
+        (
+            image_embeddings,
+            text_embeddings,
+            metadata,
+            stored_magnifications,
+        ) = load_multimodal_embeddings(feature_path, device)
 
-        magnifications = args.magnifications or list(sorted(image_embeddings.keys()))
+        _validate_alignment(metadata, image_embeddings, text_embeddings)
+
+        if args.magnifications:
+            magnifications = list(args.magnifications)
+        elif stored_magnifications:
+            magnifications = [mag for mag in stored_magnifications if mag in image_embeddings]
+            if not magnifications:
+                magnifications = list(sorted(image_embeddings.keys()))
+        else:
+            magnifications = list(sorted(image_embeddings.keys()))
+
         msci_result = compute_msci(image_embeddings, text_embeddings, magnifications)
         cmi_results = compute_cmi_lb_across_magnifications(
             image_embeddings,
