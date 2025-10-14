@@ -10,11 +10,8 @@ import torch
 import torch.nn.functional as F
 from scipy.stats import weightedtau
 
-from gabor_eng import (
-    compute_gabor_scores,
-    benchmark_runtime,
-    fisher_score as _lda_fisher_score,
-)
+from gabor_eng import compute_gabor_scores, benchmark_runtime
+from HoI import compute_histogram_intersection_metric
 
 
 @dataclass
@@ -65,29 +62,20 @@ def _to_tensor(value: Any) -> torch.Tensor:
     return torch.as_tensor(value, dtype=torch.float32)
 
 
-def _compute_direct_fisher(
-    embeddings: Any, labels: Any, device: str = "cpu"
+def _compute_histogram_score(
+    embeddings: Any, labels: Any, *, device: str = "cpu", num_bins: int = 50
 ) -> float:
-    """Compute Fisher score directly from the provided embeddings.
+    """Compute the Histogram-of-Intersection separation score.
 
-    The helper mirrors the Fisher discriminant ratio implementation in
-    :mod:`gabor_eng` but operates on the raw feature space instead of the
-    intermediate Gabor-transformed representation.
+    This wraps :func:`HoI.compute_histogram_intersection_metric` so that the
+    scoring pipeline can evaluate class separability directly on the raw
+    embeddings instead of the Gabor feature space.  Higher values indicate
+    lower histogram overlap (i.e. better class separation).
     """
 
-    feats = _to_tensor(embeddings).to(device)
-    labs = torch.as_tensor(labels, device=device)
-    if labs.ndim > 1:
-        labs = labs.squeeze()
-    labs = labs.long()
-
-    if feats.ndim != 2:
-        raise ValueError(
-            f"Expected rank-2 embeddings for Fisher computation, got shape {tuple(feats.shape)}"
-        )
-
-    feats = feats - feats.mean(dim=0, keepdim=True)
-    return float(_lda_fisher_score(feats, labs))
+    return compute_histogram_intersection_metric(
+        embeddings, labels, num_bins=num_bins, device=device
+    )
 
 
 def _coerce_magnification_int(value: Any) -> Tuple[int | None, str]:
@@ -596,13 +584,17 @@ def compute_gabor_scores_from_paths(
         evald["labels"],
         device=device,
     )
+    # Drop the legacy Fisher entry produced by ``compute_gabor_scores`` so the
+    # downstream pipeline only surfaces the histogram-based separability
+    # metric.
+    scores.pop("fisher", None)
     print(f"Gabor Energy Score (Full): {scores['energy']}")
-    direct_fisher = _compute_direct_fisher(
+    histogram_score = _compute_histogram_score(
         evald["embeddings"], evald["labels"], device=device
     )
-    scores["fisher"] = direct_fisher
-    scores["combined"] = scores["energy"] + direct_fisher
-    print(f"Fisher Score: {direct_fisher}")
+    scores["histogram"] = histogram_score
+    scores["combined"] = scores["energy"] + histogram_score
+    print(f"Histogram Intersection Score: {histogram_score}")
 
     msci_params: Dict[str, Any] = {}
     manifest_source: str | pd.DataFrame | None = None
@@ -832,33 +824,33 @@ def normalize_and_combine_scores(
     Parameters
     ----------
     dataset_results:
-        Raw ``energy`` and ``fisher`` scores per dataset and model.
+        Raw ``energy`` and ``histogram`` scores per dataset and model.
     weights:
-        Tuple giving the weight for normalized energy and Fisher scores
+        Tuple giving the weight for normalized energy and histogram scores
         respectively when forming the combined score.
     signs:
-        Tuple of orientation multipliers for energy and Fisher metrics. A
+        Tuple of orientation multipliers for energy and histogram metrics. A
         negative value flips the metric so that higher values correspond to
         better accuracy.
     """
 
-    w_energy, w_fisher = weights
-    s_energy, s_fisher = signs
+    w_energy, w_hist = weights
+    s_energy, s_hist = signs
     combined: Dict[str, Dict[str, Dict[str, float]]] = {}
     for dataset, models in dataset_results.items():
         energies = np.array([s["energy"] for s in models.values()])
-        fishers = np.array([s["fisher"] for s in models.values()])
+        hist_scores = np.array([s["histogram"] for s in models.values()])
         e_mean, e_std = energies.mean(), energies.std() or 1.0
-        f_mean, f_std = fishers.mean(), fishers.std() or 1.0
+        h_mean, h_std = hist_scores.mean(), hist_scores.std() or 1.0
 
         combined[dataset] = {}
         for model, scores in models.items():
             energy_norm = s_energy * (-((scores["energy"] - e_mean) / e_std))
-            fisher_norm = s_fisher * ((scores["fisher"] - f_mean) / f_std)
-            combined_score = w_energy * energy_norm + w_fisher * fisher_norm
+            hist_norm = s_hist * ((scores["histogram"] - h_mean) / h_std)
+            combined_score = w_energy * energy_norm + w_hist * hist_norm
             combined[dataset][model] = {
                 "energy": scores["energy"],
-                "fisher": scores["fisher"],
+                "histogram": scores["histogram"],
                 "combined": combined_score,
             }
     return combined
@@ -878,68 +870,68 @@ def derive_optimal_weights(
     """
 
     normed: Dict[str, Dict[str, Sequence[float]]] = {}
-    e_all, f_all, acc_all = [], [], []
+    e_all, h_all, acc_all = [], [], []
 
     for dataset, models in dataset_results.items():
         if dataset not in ground_truth:
             continue
         energies = []
-        fishers = []
+        hist_scores = []
         accs = []
         names = []
         for model, scores in models.items():
             if model in ground_truth[dataset]:
                 energies.append(scores["energy"])
-                fishers.append(scores["fisher"])
+                hist_scores.append(scores["histogram"])
                 accs.append(ground_truth[dataset][model])
                 names.append(model)
         if not energies:
             continue
         energies = np.asarray(energies)
-        fishers = np.asarray(fishers)
+        hist_scores = np.asarray(hist_scores)
         accs = np.asarray(accs)
         e_norm = -((energies - energies.mean()) / (energies.std() or 1.0))
-        f_norm = (fishers - fishers.mean()) / (fishers.std() or 1.0)
-        normed[dataset] = {m: (e, f, a) for m, e, f, a in zip(names, e_norm, f_norm, accs)}
+        h_norm = (hist_scores - hist_scores.mean()) / (hist_scores.std() or 1.0)
+        normed[dataset] = {m: (e, h, a) for m, e, h, a in zip(names, e_norm, h_norm, accs)}
         e_all.extend(e_norm)
-        f_all.extend(f_norm)
+        h_all.extend(h_norm)
         acc_all.extend(accs)
 
     if not e_all:
         return default, (1.0, 1.0)
 
     e_all = np.asarray(e_all)
-    f_all = np.asarray(f_all)
+    h_all = np.asarray(h_all)
     acc_all = np.asarray(acc_all)
     e_tau, _ = weightedtau(e_all, acc_all)
-    f_tau, _ = weightedtau(f_all, acc_all)
+    h_tau, _ = weightedtau(h_all, acc_all)
     e_sign = 1.0 if e_tau >= 0 else -1.0
-    f_sign = 1.0 if f_tau >= 0 else -1.0
+    h_sign = 1.0 if h_tau >= 0 else -1.0
 
     for dataset in normed:
         for model in normed[dataset]:
-            e, f, a = normed[dataset][model]
-            normed[dataset][model] = (e_sign * e, f_sign * f, a)
+            e, h, a = normed[dataset][model]
+            normed[dataset][model] = (e_sign * e, h_sign * h, a)
 
     best_tau = -2.0
     best_w = default
     for w_energy in search_space:
-        for w_fisher in search_space:
+        for w_hist in search_space:
             taus = []
             for dataset, models in normed.items():
                 preds = []
                 truth = []
-                for e, f, a in models.values():
-                    preds.append(w_energy * e + w_fisher * f)
+                for e, h, a in models.values():
+                    preds.append(w_energy * e + w_hist * h)
                     truth.append(a)
                 tau, _ = weightedtau(preds, truth)
                 taus.append(tau)
             mean_tau = float(np.mean(taus)) if taus else -2.0
             if mean_tau > best_tau:
                 best_tau = mean_tau
-                best_w = (float(w_energy), float(w_fisher))
+                best_w = (float(w_energy), float(w_hist))
     print(f"Optimized global weights: {best_w} (tau={best_tau})")
-    return best_w, (e_sign, f_sign)
+    return best_w, (e_sign, h_sign)
 
 
 def compute_weighted_kendall_tau(
