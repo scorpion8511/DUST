@@ -117,6 +117,8 @@ def _metadata_from_features(
     features: Mapping[str, Any],
     region_column: str,
     magnification_column: str,
+    *,
+    label_column: str | None = None,
 ) -> pd.DataFrame | None:
     """Construct a metadata frame directly from the feature payload.
 
@@ -149,6 +151,21 @@ def _metadata_from_features(
         region_column: regions,
         magnification_column: mags,
     }
+
+    label_values: Sequence[Any] | None = None
+    label_name = label_column
+
+    if label_column and label_column in features:
+        label_values = features[label_column]
+    elif "labels" in features:
+        label_values = features["labels"]
+        if not label_name:
+            label_name = "labels"
+
+    if label_values is not None:
+        label_array = np.asarray(label_values)
+        if label_array.shape[0] == embeddings.shape[0]:
+            data[label_name or "labels"] = label_array.tolist()
 
     row_indices = features.get("row_indices")
     if row_indices is not None and len(row_indices) == embeddings.shape[0]:
@@ -218,12 +235,170 @@ def _load_manifest_for_features(
     return None
 
 
+def _ensure_column(
+    frame: pd.DataFrame,
+    preferred: str | None,
+    *,
+    fallbacks: Sequence[str] = (),
+    required: bool = True,
+    context: str = "",
+) -> str | None:
+    """Return an available column name, optionally trying fallbacks."""
+
+    candidates = [preferred] if preferred else []
+    for fallback in fallbacks:
+        if fallback not in candidates:
+            candidates.append(fallback)
+
+    for name in candidates:
+        if name and name in frame.columns:
+            if preferred and name != preferred:
+                warnings.warn(
+                    f"Column '{preferred}' unavailable; using '{name}' instead for {context or 'MSCI'}.",
+                    RuntimeWarning,
+                )
+            return name
+
+    if required:
+        raise ValueError(
+            f"Required column '{preferred}' is missing from the manifest and no fallbacks were present."
+        )
+    return None
+
+
+def _resolve_manifest(
+    features: Mapping[str, Any],
+    embeddings_tensor: torch.Tensor,
+    manifest_source: str | pd.DataFrame | None,
+    region_column: str,
+    magnification_column: str,
+    *,
+    label_column: str | None = None,
+) -> tuple[pd.DataFrame, str, str, str | None]:
+    """Resolve a manifest aligned with ``embeddings_tensor`` and infer columns."""
+
+    manifest: pd.DataFrame | None = None
+
+    if manifest_source is not None:
+        manifest = _load_manifest_for_features(
+            manifest_source, embeddings_tensor, features, region_column, magnification_column
+        )
+
+    if manifest is None:
+        manifest = _metadata_from_features(
+            embeddings_tensor,
+            features,
+            region_column,
+            magnification_column,
+            label_column=label_column,
+        )
+
+    if manifest is None:
+        raise ValueError(
+            "MSCI metadata unavailable; provide a manifest or ensure region information is stored in the features."
+        )
+
+    manifest = manifest.copy()
+
+    if len(manifest) != embeddings_tensor.shape[0]:
+        feature_row_indices = features.get("row_indices")
+        if feature_row_indices is not None:
+            row_idx = np.asarray(feature_row_indices)
+            if row_idx.ndim == 1 and row_idx.size == embeddings_tensor.shape[0]:
+                if (row_idx < 0).any() or (row_idx >= len(manifest)).any():
+                    raise ValueError("Feature row indices fall outside the manifest range")
+                manifest = manifest.iloc[row_idx].reset_index(drop=True)
+                manifest["row_index"] = row_idx.tolist()
+            else:
+                warnings.warn(
+                    "Feature row_indices do not align with embeddings; ignoring stored indices for MSCI alignment.",
+                    RuntimeWarning,
+                )
+
+    if len(manifest) != embeddings_tensor.shape[0]:
+        raise ValueError(
+            "Manifest row count does not match number of embeddings: "
+            f"{len(manifest)} vs {embeddings_tensor.shape[0]}"
+        )
+
+    manifest = manifest.reset_index(drop=True)
+
+    region_column = _ensure_column(
+        manifest,
+        region_column,
+        fallbacks=("patch_id", "region", "region_id", "bag_id"),
+        context="region grouping",
+    )
+    magnification_column = _ensure_column(
+        manifest,
+        magnification_column,
+        fallbacks=("magnification", "patch_scale", "mag", "scale"),
+        context="magnification grouping",
+    )
+    resolved_label_column = None
+    if label_column:
+        resolved_label_column = _ensure_column(
+            manifest,
+            label_column,
+            fallbacks=("label", "labels", "subtype"),
+            required=False,
+            context="label lookup",
+        )
+    else:
+        resolved_label_column = _ensure_column(
+            manifest,
+            None,
+            fallbacks=("label", "labels", "subtype"),
+            required=False,
+            context="label lookup",
+        )
+
+    return manifest, region_column, magnification_column, resolved_label_column
+
+
+def _extract_labels_from_features(
+    features: Mapping[str, Any],
+    embeddings_tensor: torch.Tensor,
+    *,
+    manifest: pd.DataFrame | None,
+    label_column: str | None,
+) -> np.ndarray:
+    """Return a label array aligned with ``embeddings_tensor``."""
+
+    if manifest is not None:
+        label_candidates = []
+        if label_column:
+            label_candidates.append(label_column)
+        label_candidates.extend(["label", "labels", "subtype"])
+        for column in label_candidates:
+            if column and column in manifest.columns:
+                values = manifest[column].to_numpy()
+                if values.shape[0] == embeddings_tensor.shape[0]:
+                    return values
+
+    preferred_keys = []
+    if label_column:
+        preferred_keys.append(label_column)
+    preferred_keys.extend(["labels", "label", "subtype"])
+
+    for key in preferred_keys:
+        if key and key in features:
+            values = np.asarray(features[key])
+            if values.shape[0] == embeddings_tensor.shape[0]:
+                return values
+
+    raise ValueError(
+        "Label information not available for MSCI computation; include labels in the features or manifest."
+    )
+
 def compute_msci_single_modality(
+    train_features: Mapping[str, Any],
     eval_features: Mapping[str, Any],
     manifest_source: str | pd.DataFrame | None,
     *,
     region_column: str = "region_id",
     magnification_column: str = "magnification",
+    label_column: str | None = "label",
     magnifications: Sequence[Any] | None = None,
 ) -> MSCIResult:
     """Compute single-modality MSCI using evaluation embeddings and a manifest.
@@ -237,79 +412,77 @@ def compute_msci_single_modality(
 
     if "embeddings" not in eval_features:
         raise KeyError("Evaluation features must contain an 'embeddings' entry")
+    if "embeddings" not in train_features:
+        raise KeyError("Training features must contain an 'embeddings' entry")
 
-    embeddings_tensor = _to_tensor(eval_features["embeddings"])
-    if embeddings_tensor.ndim != 2:
-        raise ValueError("Embeddings must be a 2D array of shape (N, D)")
+    eval_embeddings = _to_tensor(eval_features["embeddings"])
+    train_embeddings = _to_tensor(train_features["embeddings"])
 
-    manifest: pd.DataFrame | None = None
+    if eval_embeddings.ndim != 2 or train_embeddings.ndim != 2:
+        raise ValueError("Embeddings must be 2D arrays of shape (N, D)")
 
+    eval_manifest, region_column, magnification_column, resolved_label_column = _resolve_manifest(
+        eval_features,
+        eval_embeddings,
+        manifest_source,
+        region_column,
+        magnification_column,
+        label_column=label_column,
+    )
+
+    eval_labels = _extract_labels_from_features(
+        eval_features,
+        eval_embeddings,
+        manifest=eval_manifest,
+        label_column=resolved_label_column or label_column,
+    )
+    eval_label_strings = [str(v) for v in eval_labels]
+    eval_manifest["__msci_label"] = eval_label_strings
+
+    train_manifest: pd.DataFrame | None = None
     if manifest_source is not None:
-        manifest = _load_manifest_for_features(
-            manifest_source,
-            embeddings_tensor,
-            eval_features,
-            region_column,
-            magnification_column,
-        )
-
-    if manifest is None:
-        metadata_frame = _metadata_from_features(
-            embeddings_tensor, eval_features, region_column, magnification_column
-        )
-        if metadata_frame is not None:
-            manifest = metadata_frame
-
-    if manifest is None:
-        raise ValueError(
-            "MSCI metadata unavailable; provide a manifest or include region information in the features."
-        )
-
-    def _coerce_row_indices(value: Any) -> np.ndarray | None:
-        if value is None:
-            return None
-        array = np.asarray(value)
-        if array.ndim != 1:
-            return None
-        if array.size != embeddings_tensor.shape[0]:
-            return None
         try:
-            array = array.astype(int, copy=False)
+            train_manifest, _, _, train_label_column = _resolve_manifest(
+                train_features,
+                train_embeddings,
+                manifest_source,
+                region_column,
+                magnification_column,
+                label_column=resolved_label_column or label_column,
+            )
         except ValueError:
-            return None
-        return array
+            train_manifest = None
+            train_label_column = resolved_label_column or label_column
+    else:
+        train_label_column = resolved_label_column or label_column
 
-    # If the manifest contains more rows than the embeddings (for example when
-    # aggregating across splits), align rows using the optional ``row_index``
-    # column that preserves the manifest position for each embedding.
-    if len(manifest) != embeddings_tensor.shape[0]:
-        feature_row_indices = _coerce_row_indices(eval_features.get("row_indices"))
-        if feature_row_indices is not None and feature_row_indices.max() < len(manifest):
-            manifest = manifest.iloc[feature_row_indices].reset_index(drop=True)
-            manifest["row_index"] = feature_row_indices.tolist()
-        elif "row_index" in manifest and "row_indices" in eval_features:
-            row_index_series = pd.Series(eval_features["row_indices"], name="row_index")
-            manifest = (
-                manifest.merge(row_index_series.to_frame(), on="row_index", how="right")
-                .reset_index(drop=True)
-            )
-        elif "__row_index" in manifest and "row_indices" in eval_features:
-            row_index_series = pd.Series(eval_features["row_indices"], name="__row_index")
-            manifest = (
-                manifest.merge(row_index_series.to_frame(), on="__row_index", how="right")
-                .reset_index(drop=True)
-            )
+    train_labels = _extract_labels_from_features(
+        train_features,
+        train_embeddings,
+        manifest=train_manifest,
+        label_column=train_label_column,
+    )
+    train_label_strings = [str(v) for v in train_labels]
 
-    if len(manifest) != embeddings_tensor.shape[0]:
-        raise ValueError(
-            "Manifest row count does not match number of embeddings: "
-            f"{len(manifest)} vs {embeddings_tensor.shape[0]}"
-        )
+    label_to_indices: Dict[str, list[int]] = {}
+    for idx, label_value in enumerate(train_label_strings):
+        label_to_indices.setdefault(label_value, []).append(idx)
 
-    manifest = manifest.copy()
+    prototypes: Dict[str, torch.Tensor] = {}
+    for label_value, indices in label_to_indices.items():
+        if not indices:
+            continue
+        index_tensor = torch.tensor(indices, dtype=torch.long)
+        vectors = train_embeddings.index_select(0, index_tensor)
+        prototype = F.normalize(vectors.mean(dim=0), dim=0)
+        prototypes[label_value] = prototype
+
+    if not prototypes:
+        raise ValueError("Unable to build label prototypes for MSCI computation")
+
     mag_ints: list[int] = []
     mag_labels: list[str] = []
-    for value in manifest[magnification_column].tolist():
+    for value in eval_manifest[magnification_column].tolist():
         mag_int, label = _coerce_magnification_int(value)
         if mag_int is None:
             raise ValueError(
@@ -317,13 +490,15 @@ def compute_msci_single_modality(
             )
         mag_ints.append(mag_int)
         mag_labels.append(label)
-    manifest["__msci_mag_int"] = mag_ints
-    manifest["__msci_mag_label"] = mag_labels
+    eval_manifest["__msci_mag_int"] = mag_ints
+    eval_manifest["__msci_mag_label"] = mag_labels
 
     # Normalise region identifiers by removing trailing magnification tokens so
     # that regions observed at different scales collapse to a single group.
-    normalised_regions = _strip_region_suffix(manifest[region_column].astype(str).tolist())
-    manifest["__msci_region"] = normalised_regions
+    normalised_regions = _strip_region_suffix(
+        eval_manifest[region_column].astype(str).tolist()
+    )
+    eval_manifest["__msci_region"] = normalised_regions
 
     available_magnifications = set(mag_ints)
 
@@ -351,7 +526,7 @@ def compute_msci_single_modality(
     if len(requested_set) < 2 and len(available_magnifications) < 2:
         raise ValueError("MSCI requires at least two magnification levels")
 
-    grouped_regions = list(manifest.groupby("__msci_region", sort=False))
+    grouped_regions = list(eval_manifest.groupby("__msci_region", sort=False))
     regions_total = len(grouped_regions)
 
     per_region_variances: list[float] = []
@@ -360,10 +535,18 @@ def compute_msci_single_modality(
     coverage_counts: Dict[int, int] = {}
 
     for _, group in grouped_regions:
+        label_values = list({str(val) for val in group["__msci_label"].tolist()})
+        if len(label_values) != 1:
+            continue
+        label_key = label_values[0]
+        prototype = prototypes.get(label_key)
+        if prototype is None:
+            continue
+
         mag_to_vectors: Dict[int, list[torch.Tensor]] = {}
         for idx, mag_int in zip(group.index, group["__msci_mag_int"], strict=False):
             mag_to_vectors.setdefault(int(mag_int), []).append(
-                embeddings_tensor[int(idx)]
+                eval_embeddings[int(idx)]
             )
 
         available_for_region = [
@@ -386,8 +569,8 @@ def compute_msci_single_modality(
 
         stack = torch.stack(averaged_vectors, dim=0)
         normalised = F.normalize(stack, dim=-1)
-        centroid = F.normalize(normalised.mean(dim=0), dim=0)
-        sims = torch.sum(normalised * centroid, dim=-1)
+        prototype = prototype.to(normalised.device, dtype=normalised.dtype)
+        sims = torch.matmul(normalised, prototype)
         mean_sim = sims.mean()
         var = torch.mean((sims - mean_sim) ** 2)
 
@@ -480,6 +663,8 @@ def compute_gabor_scores_from_paths(
         msci_params["magnification_column"] = msci_config.get(
             "magnification_column", "magnification"
         )
+        if msci_config.get("label_column") is not None:
+            msci_params["label_column"] = msci_config.get("label_column")
         if msci_config.get("magnifications") is not None:
             msci_params["magnifications"] = msci_config.get("magnifications")
 
@@ -489,8 +674,12 @@ def compute_gabor_scores_from_paths(
     magnification_column = msci_params.get("magnification_column") or _resolve_column(
         "magnification_column", (train, evald), "magnification"
     )
+    label_column = msci_params.get("label_column") or _resolve_column(
+        "label_column", (train, evald), "label"
+    )
     msci_params.setdefault("region_column", region_column)
     msci_params.setdefault("magnification_column", magnification_column)
+    msci_params.setdefault("label_column", label_column)
 
     def _build_msci_payload(
         payloads: Sequence[Mapping[str, Any]]
@@ -545,11 +734,8 @@ def compute_gabor_scores_from_paths(
     # preferring the combined (train+eval) set so that regions with different
     # magnifications across splits are still represented.
     combined_features, combined_manifest = _build_msci_payload((train, evald))
-    msci_features: Mapping[str, Any] = evald
-    if combined_features is not None:
-        msci_features = combined_features
-        if manifest_source is None and combined_manifest is not None:
-            manifest_source = combined_manifest
+    if manifest_source is None and combined_manifest is not None:
+        manifest_source = combined_manifest
 
     # Fall back to using only the evaluation payload when a combined manifest is
     # unavailable (for example if metadata is missing).
@@ -583,10 +769,12 @@ def compute_gabor_scores_from_paths(
 
     if manifest_source is not None:
         result = compute_msci_single_modality(
-            msci_features,
+            train,
+            evald,
             manifest_source,
             region_column=msci_params.get("region_column", "region_id"),
             magnification_column=msci_params.get("magnification_column", "magnification"),
+            label_column=msci_params.get("label_column"),
             magnifications=msci_params.get("magnifications"),
         )
         scores["msci"] = result.score
@@ -830,8 +1018,9 @@ if __name__ == "__main__":
                 "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/uni_eval_features.pth",
                 "msci": {
                     "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
-                    "region_column": "region_id",
+                    "region_column": "patch_id",
                     "magnification_column": "patch_scale",
+                    "label_column": "label",
                     "magnifications": [5, 10, 20, 40],
                 },
             },
@@ -840,8 +1029,9 @@ if __name__ == "__main__":
                 "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/conch_eval_features.pth",
                 "msci": {
                     "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
-                    "region_column": "region_id",
+                    "region_column": "patch_id",
                     "magnification_column": "patch_scale",
+                    "label_column": "label",
                     "magnifications": [5, 10, 20, 40],
                 },
             },
@@ -850,8 +1040,9 @@ if __name__ == "__main__":
                 "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/giga_eval_features.pth",
                 "msci": {
                     "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
-                    "region_column": "region_id",
+                    "region_column": "patch_id",
                     "magnification_column": "patch_scale",
+                    "label_column": "label",
                     "magnifications": [5, 10, 20, 40],
                 },
             },
@@ -860,8 +1051,9 @@ if __name__ == "__main__":
                 "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/phikon_eval_features.pth",
                 "msci": {
                     "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
-                    "region_column": "region_id",
+                    "region_column": "patch_id",
                     "magnification_column": "patch_scale",
+                    "label_column": "label",
                     "magnifications": [5, 10, 20, 40],
                 },
             },
@@ -870,8 +1062,9 @@ if __name__ == "__main__":
                 "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/virchow_eval_features.pth",
                 "msci": {
                     "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
-                    "region_column": "region_id",
+                    "region_column": "patch_id",
                     "magnification_column": "patch_scale",
+                    "label_column": "label",
                     "magnifications": [5, 10, 20, 40],
                 },
             },
