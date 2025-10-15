@@ -772,7 +772,7 @@ def _resolve_label_embeddings(label_names: Mapping[int, str], *, backend: Option
         model_name = model_name or "laion/CLIP-ViT-g-14-laion2B-s12B-b42K"
         model = CLIPModel.from_pretrained(model_name)
         processor = CLIPProcessor.from_pretrained(model_name)
-        inputs = processor(labels, padding=True, return_tensors="pt")
+        inputs = processor(text=labels, padding=True, return_tensors="pt")
         with torch.inference_mode():
             text_features = model.get_text_features(**inputs)
         return text_features.cpu().numpy()
