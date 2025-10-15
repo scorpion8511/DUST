@@ -332,3 +332,22 @@ By default all magnifications present in each feature file are used.
 Setting `--magnifications` allows evaluation on a subset (shared across
 all inputs), while the `--json` flag stores the resulting metrics in a
 single JSON document keyed by feature path for further analysis.
+
+
+## Classical transferability baselines
+
+`transferability_baselines.py` wraps several classical transferability metrics 
+(GBC, SFDA, TransRate, EMMS, NCTI, and H-score) so they can be applied directly 
+to the `.pth` artifacts emitted by the extraction pipelines.
+
+```bash
+# single-modality embeddings
+python transferability_baselines.py single features.pth --manifest manifest.csv --label-column subtype
+
+# multimodal CLIP-style embeddings (image + text)
+python transferability_baselines.py multi multimodal_features.pth --manifest manifest.csv --label-column subtype
+```
+
+Use `--metrics` to select a subset of scores, `--json` to export results, and
+`--emms-backend`/`--emms-model` to choose the language backbone when computing
+EMMS.
