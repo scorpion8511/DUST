@@ -1,10 +1,22 @@
 import argparse
+from pathlib import Path
+from typing import Dict, Sequence
+
 import numpy as np
 import torch
-from typing import Dict, Sequence
-from scipy.stats import weightedtau
 
 from gabor_eng import compute_gabor_scores, benchmark_runtime
+from transferability_baselines import (
+    DATASET_FEATURE_REGISTRY,
+    FeaturePaths,
+    build_dataset_model_paths,
+    collect_ground_truth,
+    kendall_tau_table,
+    mean_tau,
+    overrides_from_specs,
+    serialise_results,
+    weighted_tau,
+)
 
 
 def compute_gabor_scores_from_paths(
@@ -140,8 +152,8 @@ def derive_optimal_weights(
     e_all = np.asarray(e_all)
     f_all = np.asarray(f_all)
     acc_all = np.asarray(acc_all)
-    e_tau, _ = weightedtau(e_all, acc_all)
-    f_tau, _ = weightedtau(f_all, acc_all)
+    e_tau = weighted_tau(e_all, acc_all)
+    f_tau = weighted_tau(f_all, acc_all)
     e_sign = 1.0 if e_tau >= 0 else -1.0
     f_sign = 1.0 if f_tau >= 0 else -1.0
 
@@ -161,7 +173,7 @@ def derive_optimal_weights(
                 for e, f, a in models.values():
                     preds.append(w_energy * e + w_fisher * f)
                     truth.append(a)
-                tau, _ = weightedtau(preds, truth)
+                tau = weighted_tau(preds, truth)
                 taus.append(tau)
             mean_tau = float(np.mean(taus)) if taus else -2.0
             if mean_tau > best_tau:
@@ -177,8 +189,7 @@ def compute_weighted_kendall_tau(
     common = [m for m in scores if m in ground_truth]
     pred = [scores[m] for m in common]
     truth = [ground_truth[m] for m in common]
-    tau, _ = weightedtau(pred, truth)
-    return tau
+    return weighted_tau(pred, truth)
 
 
 def compute_kendall_tau_across_datasets(
@@ -195,9 +206,45 @@ def compute_kendall_tau_across_datasets(
     return taus
 
 
-if __name__ == "__main__":
+def resolve_dataset_selection(
+    selected: Sequence[str], overrides: Dict[str, Dict[str, FeaturePaths]]
+) -> Dict[str, Dict[str, Sequence[str]]]:
+    """Build the dataset→model→paths mapping from CLI options."""
+
+    if selected:
+        datasets = list(dict.fromkeys(selected))
+    else:
+        datasets = list(DATASET_FEATURE_REGISTRY.keys())
+
+    if overrides:
+        for dataset in overrides:
+            if dataset not in datasets:
+                datasets.append(dataset)
+
+    return build_dataset_model_paths(datasets, overrides)
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="Score models using Gabor features")
     parser.add_argument("--device", default="cpu", help="Device to run scoring on")
+    parser.add_argument(
+        "--dataset",
+        action="append",
+        default=[],
+        help="Dataset key to evaluate (can be provided multiple times)",
+    )
+    parser.add_argument(
+        "--feature",
+        action="append",
+        default=[],
+        metavar="SPEC",
+        help="Override feature paths using DATASET:MODEL=train[,eval] syntax",
+    )
+    parser.add_argument(
+        "--json-out",
+        type=Path,
+        help="Optional path to serialise scores and Kendall's tau as JSON",
+    )
     parser.add_argument(
         "--benchmark",
         action="store_true",
@@ -205,14 +252,46 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    dataset_model_paths = {
-        "LC": {"uni": ("/path/to/train.pth", "/path/to/eval.pth")}
-    }
+    overrides = overrides_from_specs(args.feature)
+    dataset_model_paths = resolve_dataset_selection(args.dataset, overrides)
+    if not dataset_model_paths:
+        parser.error("No dataset/model feature paths resolved. Check --dataset/--feature arguments.")
+
+    print("Resolved datasets and feature paths:")
+    for dataset, models in dataset_model_paths.items():
+        print(f"  {dataset}:")
+        for model, (train_path, eval_path) in models.items():
+            print(f"    {model}: train={train_path} eval={eval_path}")
+
     raw_scores = compute_scores_for_all_datasets(dataset_model_paths, device=args.device)
-    ground_truth = {"LC": {"uni": 0.94}}
+    ground_truth = collect_ground_truth(dataset_model_paths.keys())
+    if not ground_truth:
+        print("Warning: no ground-truth accuracies were found for the selected datasets.")
+
     weights, signs = derive_optimal_weights(raw_scores, ground_truth)
     combined_scores = normalize_and_combine_scores(raw_scores, weights=weights, signs=signs)
-    compute_kendall_tau_across_datasets(combined_scores, ground_truth)
+
+    metric_signs = {"energy": signs[0], "fisher": signs[1], "combined": 1.0}
+    taus = kendall_tau_table(combined_scores, ground_truth, metric_signs)
+    if taus:
+        print("\nKendall tau (weighted) per dataset:")
+        for dataset, metrics in taus.items():
+            metric_parts = ", ".join(f"{metric}={value:.3f}" for metric, value in metrics.items())
+            print(f"  {dataset}: {metric_parts}")
+        means = mean_tau(taus)
+        if means:
+            mean_parts = ", ".join(f"{metric}={value:.3f}" for metric, value in means.items())
+            print(f"Mean tau across datasets: {mean_parts}")
+    else:
+        print("No Kendall tau scores could be computed (missing ground truth or metrics).")
+
+    if args.json_out:
+        serialise_results(combined_scores, taus, args.json_out)
+        print(f"Results written to {args.json_out}")
 
     if args.benchmark:
         print("Benchmark:", benchmark_runtime())
+
+
+if __name__ == "__main__":
+    main()
