@@ -474,6 +474,58 @@ def _build_label_map(labels: Sequence[str]) -> Tuple[np.ndarray, Dict[int, str]]
     return np.asarray(numeric, dtype=np.int64), reverse
 
 
+def _resolve_labels_from_manifest(
+    manifest_df: Optional[pd.DataFrame],
+    primary_column: Optional[str],
+    *,
+    fallback_columns: Sequence[str],
+    region_column: Optional[str] = None,
+    region_ids: Optional[Sequence[str]] = None,
+    region_mapping: Optional[Mapping[str, Sequence[str]]] = None,
+) -> Tuple[Optional[np.ndarray], Optional[Dict[int, str]], Optional[str]]:
+    if manifest_df is None:
+        return None, None, None
+
+    candidates: List[str] = []
+    if primary_column and primary_column in manifest_df.columns:
+        candidates.append(primary_column)
+    for col in fallback_columns:
+        if col and col not in candidates and col in manifest_df.columns:
+            candidates.append(col)
+
+    if not candidates:
+        return None, None, None
+
+    fallback_result: Optional[Tuple[np.ndarray, Dict[int, str], str]] = None
+    for column in candidates:
+        if region_ids is not None and region_mapping is not None and region_column:
+            lookup = {str(row[region_column]): row for _, row in manifest_df.iterrows()}
+            resolved: List[str] = []
+            for region in region_ids:
+                options = region_mapping.get(region, [region])
+                label_value = None
+                for opt in options:
+                    row = lookup.get(str(opt))
+                    if row is not None:
+                        label_value = row[column]
+                        break
+                if label_value is None:
+                    break
+                resolved.append(str(label_value))
+            else:
+                numeric, reverse = _build_label_map(resolved)
+                if len(np.unique(numeric)) >= 2:
+                    return numeric, reverse, column
+                fallback_result = (numeric, reverse, column)
+                continue
+            continue
+        numeric, reverse = _build_label_map(manifest_df[column].astype(str).tolist())
+        if len(np.unique(numeric)) >= 2:
+            return numeric, reverse, column
+        fallback_result = (numeric, reverse, column)
+    return fallback_result if fallback_result is not None else (None, None, None)
+
+
 def load_single_features(path: str, manifest: Optional[str], label_column: Optional[str]) -> FeatureBundle:
     payload: MutableMapping[str, object] = torch.load(path, map_location="cpu")
     if "embeddings" not in payload:
@@ -486,22 +538,28 @@ def load_single_features(path: str, manifest: Optional[str], label_column: Optio
     manifest_df = _load_manifest(manifest)
     if labels_tensor is not None and isinstance(labels_tensor, torch.Tensor) and labels_tensor.numel() == embeddings.shape[0]:
         labels = labels_tensor.detach().cpu().numpy().astype(np.int64)
-        if manifest_df is not None and label_column and "row_indices" in payload:
+    else:
+        labels = None
+
+    if manifest_df is not None and label_column:
+        if "row_indices" in payload:
             indices = np.asarray(payload["row_indices"], dtype=np.int64)
             subset = manifest_df.iloc[indices]
-            label_series = subset[label_column].astype(str).tolist()
-            numeric, reverse = _build_label_map(label_series)
-            if numeric.shape[0] == labels.shape[0]:
+            numeric, reverse, used_column = _resolve_labels_from_manifest(
+                subset,
+                label_column,
+                fallback_columns=["label", "subtype"],
+            )
+            if numeric is not None and numeric.shape[0] == subset.shape[0]:
                 labels = numeric
                 label_names = reverse
-    elif manifest_df is not None and label_column:
-        if "row_indices" not in payload:
+                if used_column and used_column != label_column:
+                    warnings.warn(
+                        f"Label column '{label_column}' collapsed to a single class; using '{used_column}' instead.",
+                        RuntimeWarning,
+                    )
+        elif labels is None:
             raise ValueError("Feature file is missing 'row_indices'; provide labels directly or regenerate features")
-        indices = np.asarray(payload["row_indices"], dtype=np.int64)
-        subset = manifest_df.iloc[indices]
-        numeric, reverse = _build_label_map(subset[label_column].astype(str))
-        labels = numeric
-        label_names = reverse
     else:
         labels = None
 
@@ -532,23 +590,23 @@ def load_multimodal_features(
     manifest_df = _load_manifest(manifest)
     labels: Optional[np.ndarray] = None
     label_names: Optional[Dict[int, str]] = None
-    if manifest_df is not None and label_column:
-        lookup: Dict[str, str] = {}
-        for _, row in manifest_df.iterrows():
-            lookup[str(row[region_column])] = str(row[label_column])
-        resolved: List[str] = []
-        for region in region_ids:
-            candidates = csv_mapping.get(region, [region])
-            label = None
-            for candidate in candidates:
-                if candidate in lookup:
-                    label = lookup[candidate]
-                    break
-            if label is None:
-                warnings.warn(f"Unable to resolve label for region '{region}' from manifest; assigning placeholder")
-                label = "unknown"
-            resolved.append(label)
-        labels, label_names = _build_label_map(resolved)
+    used_column: Optional[str] = None
+    if manifest_df is not None:
+        labels, label_names, used_column = _resolve_labels_from_manifest(
+            manifest_df,
+            label_column,
+            fallback_columns=["label", "subtype"],
+            region_column=region_column,
+            region_ids=region_ids,
+            region_mapping=csv_mapping,
+        )
+        if used_column and label_column and used_column != label_column:
+            warnings.warn(
+                f"Label column '{label_column}' collapsed to a single class; using '{used_column}' instead.",
+                RuntimeWarning,
+            )
+        if labels is None:
+            warnings.warn("Unable to resolve labels from manifest; metrics requiring labels will be skipped")
 
     bundles: Dict[int, FeatureBundle] = {}
     for mag in magnifications:
