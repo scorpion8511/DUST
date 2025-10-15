@@ -577,21 +577,45 @@ def evaluate_metrics(bundle: FeatureBundle, metrics: Sequence[str], *, gaussian_
 
     feature_matrix = bundle.embeddings.astype(np.float64)
     label_array = labels.astype(np.int64) if labels is not None else None
+    num_classes = 0
+    if label_array is not None:
+        num_classes = len(np.unique(label_array))
 
     for metric in metrics:
         if metric == "gbc":
             if label_array is None:
                 warnings.warn("Skipping GBC because labels are unavailable")
                 continue
+            if num_classes < 2:
+                warnings.warn(
+                    "GBC requires at least two distinct classes; returning NaN",
+                    RuntimeWarning,
+                )
+                results["gbc"] = float("nan")
+                continue
             results["gbc"] = gbc_score(feature_matrix, label_array, gaussian_type=gaussian_type)
         elif metric == "sfda":
             if label_array is None:
                 warnings.warn("Skipping SFDA because labels are unavailable")
                 continue
+            if num_classes < 2:
+                warnings.warn(
+                    "SFDA requires at least two distinct classes; returning NaN",
+                    RuntimeWarning,
+                )
+                results["sfda"] = float("nan")
+                continue
             results["sfda"] = sfda_score(feature_matrix, label_array)
         elif metric == "transrate":
             if label_array is None:
                 warnings.warn("Skipping TransRate because labels are unavailable")
+                continue
+            if num_classes < 2:
+                warnings.warn(
+                    "TransRate requires at least two distinct classes; returning NaN",
+                    RuntimeWarning,
+                )
+                results["transrate"] = float("nan")
                 continue
             results["transrate"] = transrate_score(feature_matrix, label_array)
         elif metric == "emms":
@@ -611,6 +635,13 @@ def evaluate_metrics(bundle: FeatureBundle, metrics: Sequence[str], *, gaussian_
         elif metric == "hscore":
             if label_array is None:
                 warnings.warn("Skipping H-score because labels are unavailable")
+                continue
+            if num_classes < 2:
+                warnings.warn(
+                    "H-score requires at least two distinct classes; returning NaN",
+                    RuntimeWarning,
+                )
+                results["h_score"] = float("nan")
                 continue
             results["h_score"] = h_score(feature_matrix, label_array)
         else:
