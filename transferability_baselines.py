@@ -407,7 +407,10 @@ def ncti_score(X: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
     C = len(np.unique(y))
-    pca = PCA(n_components=min(64, X.shape[1]))
+    max_components = min(64, X.shape[1], X.shape[0])
+    if max_components < 1:
+        raise ValueError("NCTI requires at least one sample to compute PCA")
+    pca = PCA(n_components=max_components)
     X_pca = pca.fit_transform(X)
     shrink = max(math.exp(-pca.explained_variance_[:32].sum()), 1e-10)
     if shrink == 1e-10:
