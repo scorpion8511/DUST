@@ -40,6 +40,7 @@ import argparse
 import json
 import math
 import os
+import re
 import warnings
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
@@ -474,6 +475,62 @@ def _build_label_map(labels: Sequence[str]) -> Tuple[np.ndarray, Dict[int, str]]
     return np.asarray(numeric, dtype=np.int64), reverse
 
 
+_MAG_SUFFIX_PATTERN = re.compile(r"(?:_[0-9]+x)+$", re.IGNORECASE)
+
+
+def _strip_region_suffix(value: str) -> str:
+    """Remove trailing magnification tokens (e.g. ``_5x``) from region identifiers."""
+
+    return _MAG_SUFFIX_PATTERN.sub("", str(value))
+
+
+def _resolve_labels_via_mapping(
+    manifest_df: pd.DataFrame,
+    column: str,
+    region_column: str,
+    region_ids: Sequence[str],
+    region_mapping: Optional[Mapping[str, Sequence[str]]],
+) -> Optional[List[str]]:
+    lookup = {str(row[region_column]): row for _, row in manifest_df.iterrows()}
+    resolved: List[str] = []
+    for region in region_ids:
+        options = region_mapping.get(region, [region]) if region_mapping else [region]
+        label_value = None
+        for opt in options:
+            row = lookup.get(str(opt))
+            if row is not None:
+                label_value = row[column]
+                break
+        if label_value is None:
+            return None
+        resolved.append(str(label_value))
+    return resolved
+
+
+def _resolve_labels_via_canonical(
+    manifest_df: pd.DataFrame,
+    column: str,
+    region_column: str,
+    region_ids: Sequence[str],
+) -> Optional[List[str]]:
+    stripped = manifest_df[region_column].astype(str).map(_strip_region_suffix)
+    resolved: List[str] = []
+    for region in region_ids:
+        mask = stripped == region
+        if not mask.any():
+            return None
+        candidates = manifest_df.loc[mask, column].dropna().astype(str).unique()
+        if len(candidates) == 0:
+            return None
+        if len(candidates) > 1:
+            warnings.warn(
+                f"Region '{region}' has multiple labels in column '{column}'; using the first value {candidates[0]!r}.",
+                RuntimeWarning,
+            )
+        resolved.append(candidates[0])
+    return resolved
+
+
 def _resolve_labels_from_manifest(
     manifest_df: Optional[pd.DataFrame],
     primary_column: Optional[str],
@@ -498,28 +555,25 @@ def _resolve_labels_from_manifest(
 
     fallback_result: Optional[Tuple[np.ndarray, Dict[int, str], str]] = None
     for column in candidates:
-        if region_ids is not None and region_mapping is not None and region_column:
-            lookup = {str(row[region_column]): row for _, row in manifest_df.iterrows()}
-            resolved: List[str] = []
-            for region in region_ids:
-                options = region_mapping.get(region, [region])
-                label_value = None
-                for opt in options:
-                    row = lookup.get(str(opt))
-                    if row is not None:
-                        label_value = row[column]
-                        break
-                if label_value is None:
-                    break
-                resolved.append(str(label_value))
-            else:
-                numeric, reverse = _build_label_map(resolved)
-                if len(np.unique(numeric)) >= 2:
-                    return numeric, reverse, column
-                fallback_result = (numeric, reverse, column)
-                continue
+        resolved_values: Optional[List[str]] = None
+        if region_ids is not None and region_column:
+            resolved_values = _resolve_labels_via_mapping(
+                manifest_df, column, region_column, region_ids, region_mapping
+            )
+            if resolved_values is None:
+                resolved_values = _resolve_labels_via_canonical(
+                    manifest_df, column, region_column, region_ids
+                )
+        if resolved_values is None:
+            resolved_values = manifest_df[column].astype(str).tolist()
+
+        numeric, reverse = _build_label_map(resolved_values)
+        if region_ids is not None and len(resolved_values) != len(region_ids):
+            warnings.warn(
+                f"Label column '{column}' produced {len(resolved_values)} labels for {len(region_ids)} regions; skipping.",
+                RuntimeWarning,
+            )
             continue
-        numeric, reverse = _build_label_map(manifest_df[column].astype(str).tolist())
         if len(np.unique(numeric)) >= 2:
             return numeric, reverse, column
         fallback_result = (numeric, reverse, column)
@@ -635,9 +689,21 @@ def evaluate_metrics(bundle: FeatureBundle, metrics: Sequence[str], *, gaussian_
 
     feature_matrix = bundle.embeddings.astype(np.float64)
     label_array = labels.astype(np.int64) if labels is not None else None
+    if label_array is not None and label_array.shape[0] != feature_matrix.shape[0]:
+        warnings.warn(
+            "Label count does not match embedding count; skipping label-dependent metrics.",
+            RuntimeWarning,
+        )
+        label_array = None
     num_classes = 0
     if label_array is not None:
-        num_classes = len(np.unique(label_array))
+        unique, counts = np.unique(label_array, return_counts=True)
+        num_classes = len(unique)
+        if num_classes < 2:
+            warnings.warn(
+                "Only one class present after label resolution; metrics requiring labels will be reported as NaN.",
+                RuntimeWarning,
+            )
 
     for metric in metrics:
         if metric == "gbc":
@@ -677,7 +743,7 @@ def evaluate_metrics(bundle: FeatureBundle, metrics: Sequence[str], *, gaussian_
                 continue
             results["transrate"] = transrate_score(feature_matrix, label_array)
         elif metric == "emms":
-            if bundle.label_names is None:
+            if not bundle.label_names:
                 warnings.warn("Skipping EMMS because label names are unavailable")
                 continue
             embeddings = _resolve_label_embeddings(bundle.label_names, backend=emms_backend, model_name=emms_model)
