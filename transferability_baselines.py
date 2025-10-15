@@ -806,7 +806,12 @@ def build_argparser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("features", type=str, help="Path to the feature .pth file")
+    common.add_argument(
+        "features",
+        nargs="?",
+        default=None,
+        help="Path to the feature .pth file (or omit when using --dataset/--model)",
+    )
     common.add_argument("--manifest", type=str, default=None, help="Optional CSV manifest used to recover labels")
     common.add_argument("--label-column", type=str, default="subtype", help="Column containing class labels in the manifest")
     common.add_argument("--metrics", nargs="*", default=["gbc", "sfda", "transrate", "emms", "ncti", "hscore"], help="Metrics to compute")
@@ -825,6 +830,17 @@ def build_argparser() -> argparse.ArgumentParser:
     subparsers.add_parser("single", parents=[common], help="Evaluate single-modality features")
 
     multi = subparsers.add_parser("multi", parents=[common], help="Evaluate multimodal features")
+    multi.add_argument(
+        "--dataset",
+        type=str,
+        choices=sorted(DEFAULT_DATASET_MODEL_PATHS.keys()),
+        help="Dataset key providing default feature paths",
+    )
+    multi.add_argument(
+        "--model",
+        type=str,
+        help="Model name within the dataset mapping when --dataset is used",
+    )
     multi.add_argument("--region-column", type=str, default="patch_id", help="Region identifier column in the manifest")
     multi.add_argument("--magnification-column", type=str, default="patch_scale", help="Magnification column in the manifest")
 
@@ -843,6 +859,8 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
     metrics = args.metrics
 
     if args.mode == "single":
+        if args.features is None:
+            parser.error("single mode requires a feature file path")
         bundle = load_single_features(args.features, args.manifest, args.label_column)
         result = evaluate_metrics(
             bundle,
@@ -880,8 +898,17 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
             _write_json(args.json, results)
         return results
 
+    feature_path = args.features
+    if feature_path is None:
+        if not args.dataset or not args.model:
+            parser.error("multi mode requires either a feature file or both --dataset and --model")
+        dataset_paths = DEFAULT_DATASET_MODEL_PATHS.get(args.dataset, {})
+        if args.model not in dataset_paths:
+            parser.error(f"Model '{args.model}' not found in dataset '{args.dataset}'")
+        feature_path = dataset_paths[args.model]
+
     image_bundles, text_bundle = load_multimodal_features(
-        args.features,
+        feature_path,
         args.manifest,
         label_column=args.label_column,
         region_column=args.region_column,
@@ -897,7 +924,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
             emms_backend=args.emms_backend,
             emms_model=args.emms_model,
         )
-        _print_results(f"{args.features} [image {magnification}x]", aggregated[key])
+        _print_results(f"{feature_path} [image {magnification}x]", aggregated[key])
     aggregated["text"] = evaluate_metrics(
         text_bundle,
         metrics,
@@ -905,7 +932,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
         emms_backend=args.emms_backend,
         emms_model=args.emms_model,
     )
-    _print_results(f"{args.features} [text]", aggregated["text"])
+    _print_results(f"{feature_path} [text]", aggregated["text"])
     if args.json:
         _write_json(args.json, aggregated)
     return aggregated
