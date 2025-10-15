@@ -407,6 +407,9 @@ def ncti_score(X: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
     C = len(np.unique(y))
+    if C < 2:
+        warnings.warn("NCTI requires at least two distinct classes; returning NaNs", RuntimeWarning)
+        return float("nan"), float("nan"), float("nan")
     max_components = min(64, X.shape[1], X.shape[0])
     if max_components < 1:
         raise ValueError("NCTI requires at least one sample to compute PCA")
