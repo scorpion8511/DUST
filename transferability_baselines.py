@@ -694,6 +694,10 @@ def evaluate_multimodal_dataset(
     gaussian_type: str,
     emms_backend: Optional[str],
     emms_model: Optional[str],
+    manifest: Optional[str] = None,
+    label_column: str = "subtype",
+    region_column: str = "patch_id",
+    magnification_column: str = "patch_scale",
 ) -> Dict[str, object]:
     if dataset not in DEFAULT_DATASET_MODEL_PATHS:
         raise ValueError(f"Unknown dataset '{dataset}' for multimodal evaluation")
@@ -707,10 +711,10 @@ def evaluate_multimodal_dataset(
     for model_name, feature_path in models.items():
         image_bundles, text_bundle = load_multimodal_features(
             feature_path,
-            manifest=None,
-            label_column="subtype",
-            region_column="patch_id",
-            magnification_column="patch_scale",
+            manifest,
+            label_column=label_column,
+            region_column=region_column,
+            magnification_column=magnification_column,
         )
 
         per_outputs: Dict[str, Dict[str, float]] = {}
@@ -833,6 +837,7 @@ def build_argparser() -> argparse.ArgumentParser:
     multi.add_argument(
         "--dataset",
         type=str,
+        default="TCGA",
         choices=sorted(DEFAULT_DATASET_MODEL_PATHS.keys()),
         help="Dataset key providing default feature paths",
     )
@@ -900,12 +905,29 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
 
     feature_path = args.features
     if feature_path is None:
-        if not args.dataset or not args.model:
-            parser.error("multi mode requires either a feature file or both --dataset and --model")
-        dataset_paths = DEFAULT_DATASET_MODEL_PATHS.get(args.dataset, {})
-        if args.model not in dataset_paths:
-            parser.error(f"Model '{args.model}' not found in dataset '{args.dataset}'")
-        feature_path = dataset_paths[args.model]
+        dataset_key = args.dataset or "TCGA"
+        dataset_paths = DEFAULT_DATASET_MODEL_PATHS.get(dataset_key)
+        if dataset_paths is None:
+            parser.error(f"Unknown dataset '{dataset_key}'")
+        if args.model:
+            if args.model not in dataset_paths:
+                parser.error(f"Model '{args.model}' not found in dataset '{dataset_key}'")
+            feature_path = dataset_paths[args.model]
+        else:
+            results = evaluate_multimodal_dataset(
+                dataset_key,
+                metrics,
+                gaussian_type=args.gaussian_type,
+                emms_backend=args.emms_backend,
+                emms_model=args.emms_model,
+                manifest=args.manifest,
+                label_column=args.label_column,
+                region_column=args.region_column,
+                magnification_column=args.magnification_column,
+            )
+            if args.json:
+                _write_json(args.json, results)
+            return results
 
     image_bundles, text_bundle = load_multimodal_features(
         feature_path,
