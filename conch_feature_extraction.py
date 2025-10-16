@@ -64,8 +64,15 @@ class RegionAccumulator:
     text_values: List[str] = field(default_factory=list)
     images: Dict[int, torch.Tensor] = field(default_factory=dict)
     metadata: Dict[str, object] = field(
-        default_factory=lambda: {"patches": {}, "samples": [], "csv_region_ids": set()}
+        default_factory=lambda: {
+            "patches": {},
+            "samples": [],
+            "csv_region_ids": set(),
+            "base_region_ids": set(),
+            "slide_ids": set(),
+        }
     )
+    labels: set[str] = field(default_factory=set)
 
 
 def build_collate_fn(preprocess):
@@ -111,6 +118,8 @@ def extract_conch_embeddings(
     normalize: bool,
     magnifications: Optional[Sequence[int]],
     drop_missing: bool,
+    label_column: Optional[str],
+    slide_column: Optional[str],
 ) -> Dict[str, object]:
     regions: "OrderedDict[str, RegionAccumulator]" = OrderedDict()
     observed_magnifications: set[int] = set()
@@ -134,11 +143,30 @@ def extract_conch_embeddings(
         image_embeddings = image_embeddings.detach().cpu()
         text_embeddings = text_embeddings.detach().cpu()
 
-        for idx, region_id in enumerate(batch["region_ids"]):
+        for idx, base_region_id in enumerate(batch["region_ids"]):
             magnification = int(batch["magnifications"][idx])
             observed_magnifications.add(magnification)
 
-            accumulator = regions.setdefault(region_id, RegionAccumulator(region_id=region_id))
+            csv_metadata = batch["metadata"][idx]
+            csv_row = csv_metadata.get("csv_row")
+
+            slide_value: Optional[str] = None
+            if slide_column:
+                if isinstance(csv_row, Mapping):
+                    slide_value = csv_row.get(slide_column)  # type: ignore[index]
+                if slide_value is None:
+                    slide_value = csv_metadata.get(slide_column)
+                if slide_value is not None:
+                    slide_value = str(slide_value).strip()
+                    if not slide_value:
+                        slide_value = None
+
+            if slide_value:
+                region_key = f"{slide_value}::{base_region_id}"
+            else:
+                region_key = base_region_id
+
+            accumulator = regions.setdefault(region_key, RegionAccumulator(region_id=region_key))
 
             embedding_image = image_embeddings[idx]
             embedding_text = text_embeddings[idx]
@@ -151,14 +179,28 @@ def extract_conch_embeddings(
             accumulator.text_values.append(texts[idx])
 
             accumulator.images[magnification] = embedding_image
-            accumulator.metadata.setdefault("samples", []).append(batch["metadata"][idx])
+            accumulator.metadata.setdefault("samples", []).append(csv_metadata)
+            accumulator.metadata.setdefault("base_region_ids", set()).add(base_region_id)
+            if slide_value:
+                accumulator.metadata.setdefault("slide_ids", set()).add(slide_value)
 
-            patch = batch["metadata"][idx].get("patch")
+            patch = csv_metadata.get("patch")
             if patch is not None:
                 accumulator.metadata.setdefault("patches", {})[magnification] = patch
 
-            original_id = batch["metadata"][idx].get("csv_region_id", region_id)
+            original_id = csv_metadata.get("csv_region_id", base_region_id)
             accumulator.metadata.setdefault("csv_region_ids", set()).add(original_id)
+
+            if label_column:
+                label_value = None
+                if isinstance(csv_row, Mapping):
+                    label_value = csv_row.get(label_column)
+                if label_value is None:
+                    label_value = csv_metadata.get(label_column)
+                if label_value is not None:
+                    if isinstance(label_value, str):
+                        label_value = label_value.strip()
+                    accumulator.labels.add(str(label_value))
 
     if magnifications is None:
         ordered_magnifications = sorted(observed_magnifications)
@@ -175,6 +217,7 @@ def extract_conch_embeddings(
     raw_texts: List[Optional[str]] = []
     csv_region_mapping: Dict[str, List[str]] = {}
     patches = {mag: [] for mag in ordered_magnifications}
+    region_labels: List[Optional[str]] = []
 
     for region_id, accumulator in regions.items():
         if accumulator.text_sum is None or accumulator.text_count == 0:
@@ -200,6 +243,17 @@ def extract_conch_embeddings(
             csv_ids = {region_id}
         csv_region_mapping[region_id] = sorted(csv_ids)
 
+        if label_column:
+            label_values = sorted(accumulator.labels)
+            if not label_values:
+                region_labels.append(None)
+            elif len(label_values) == 1:
+                region_labels.append(label_values[0])
+            else:
+                raise ValueError(
+                    f"Region {region_id} has conflicting labels {label_values} in column '{label_column}'."
+                )
+
         for mag in ordered_magnifications:
             embedding = accumulator.images.get(mag)
             if embedding is None:
@@ -220,6 +274,8 @@ def extract_conch_embeddings(
         for mag in ordered_magnifications:
             if patches[mag]:
                 patches[mag].pop()
+        if label_column and region_labels:
+            region_labels.pop()
 
     if not region_ids:
         raise ValueError(
@@ -237,12 +293,31 @@ def extract_conch_embeddings(
             )
         image_tensors[mag] = torch.stack(embeddings, dim=0)  # type: ignore[arg-type]
 
+    base_region_aliases: Dict[str, List[str]] = {}
+    slide_mapping: Dict[str, List[str]] = {}
+    for region_id in region_ids:
+        base_ids = regions[region_id].metadata.get("base_region_ids", set())
+        if base_ids:
+            base_region_aliases[region_id] = sorted(
+                str(alias) for alias in base_ids if alias is not None
+            )
+        slide_ids = regions[region_id].metadata.get("slide_ids", set())
+        if slide_ids:
+            slide_mapping[region_id] = sorted(str(slide) for slide in slide_ids if slide is not None)
+
     metadata = {
         "region_ids": region_ids,
         "texts": raw_texts,
         "patches": patches,
         "csv_region_mapping": csv_region_mapping,
     }
+    if base_region_aliases:
+        metadata["base_region_ids"] = base_region_aliases
+    if slide_mapping:
+        metadata["slide_ids"] = slide_mapping
+    if label_column:
+        metadata["labels"] = region_labels
+        metadata["label_column"] = label_column
 
     return {
         "image_embeddings": image_tensors,
@@ -262,6 +337,13 @@ def save_outputs(features: Mapping[str, object], output_path: str, metadata_json
             "csv_region_mapping": features["metadata"]["csv_region_mapping"],
             "magnifications": features["magnifications"],
         }
+        if "base_region_ids" in features["metadata"]:
+            serialisable["base_region_ids"] = features["metadata"]["base_region_ids"]
+        if "slide_ids" in features["metadata"]:
+            serialisable["slide_ids"] = features["metadata"]["slide_ids"]
+        if "labels" in features["metadata"]:
+            serialisable["labels"] = features["metadata"]["labels"]
+            serialisable["label_column"] = features["metadata"].get("label_column")
         with open(metadata_json, "w", encoding="utf-8") as handle:
             json.dump(serialisable, handle, indent=2)
 
@@ -351,6 +433,18 @@ def build_argparser() -> argparse.ArgumentParser:
         "--drop-missing",
         action="store_true",
         help="Discard regions missing any requested magnification instead of raising an error.",
+    )
+    parser.add_argument(
+        "--label-column",
+        type=str,
+        default=None,
+        help="CSV column containing region-level labels to store in the output metadata.",
+    )
+    parser.add_argument(
+        "--slide-column",
+        type=str,
+        default=None,
+        help="CSV column identifying the parent slide for each region (used to disambiguate region IDs).",
     )
     parser.add_argument(
         "--metadata-json",
@@ -446,6 +540,8 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         normalize=args.normalize,
         magnifications=_ensure_iterable(args.magnifications),
         drop_missing=args.drop_missing,
+        label_column=args.label_column,
+        slide_column=args.slide_column,
     )
 
     metadata = features.get("metadata")

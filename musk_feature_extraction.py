@@ -142,6 +142,9 @@ class RegionState:
     text_embedding: Optional[Tensor] = None
     magnification_embeddings: Dict[int, Tensor] = field(default_factory=dict)
     metadata: Dict[str, object] = field(default_factory=lambda: {"patches": {}, "rows": []})
+    base_region_ids: set = field(default_factory=set)
+    slide_ids: set = field(default_factory=set)
+    labels: set[str] = field(default_factory=set)
 
 
 class MUSKEncoder:
@@ -247,12 +250,24 @@ def _collate_samples(batch: Sequence[Mapping[str, object]]) -> Dict[str, List[ob
     }
 
 
-def _accumulate_metadata(entry: RegionState, metadata: Mapping[str, object], magnification: int) -> None:
-    entry.csv_region_ids.add(str(metadata.get("csv_region_id")))
+def _accumulate_metadata(
+    entry: RegionState,
+    metadata: Mapping[str, object],
+    magnification: int,
+    base_region_id: str,
+    slide_value: Optional[str],
+) -> None:
+    csv_region_id = metadata.get("csv_region_id", base_region_id)
+    entry.csv_region_ids.add(str(csv_region_id))
     entry.metadata.setdefault("rows", []).append(metadata.get("csv_row"))
     entry.metadata.setdefault("images", {})[magnification] = metadata.get("image_path")
     if metadata.get("patch") is not None:
         entry.metadata.setdefault("patches", {})[magnification] = metadata.get("patch")
+    entry.base_region_ids.add(str(base_region_id))
+    entry.metadata.setdefault("base_region_ids", set()).add(str(base_region_id))
+    if slide_value:
+        entry.slide_ids.add(slide_value)
+        entry.metadata.setdefault("slide_ids", set()).add(slide_value)
 
 
 def extract_musk_embeddings(
@@ -264,6 +279,8 @@ def extract_musk_embeddings(
     num_workers: int,
     dataset_kwargs: Mapping[str, object],
     metadata_json: Optional[str] = None,
+    label_column: Optional[str] = None,
+    slide_column: Optional[str] = None,
 ) -> None:
     dataset = ImageTextCSVDataset(csv_path=csv_path, **dataset_kwargs)
     loader = DataLoader(
@@ -287,15 +304,43 @@ def extract_musk_embeddings(
         image_tensors = torch.stack([image_transform(img) for img in pil_images])
         image_embeddings = encoder.encode_images(image_tensors)
 
-        for idx, region_id in enumerate(batch["region_ids"]):
+        for idx, base_region_id in enumerate(batch["region_ids"]):
             magnification = batch["magnifications"][idx]
             text_value = batch["texts"][idx]
             metadata = batch["metadata"][idx]
+            csv_row = metadata.get("csv_row")
 
-            entry = regions.setdefault(region_id, RegionState())
-            _accumulate_metadata(entry, metadata, magnification)
+            slide_value: Optional[str] = None
+            if slide_column:
+                if isinstance(csv_row, Mapping):
+                    slide_value = csv_row.get(slide_column)  # type: ignore[index]
+                if slide_value is None:
+                    slide_value = metadata.get(slide_column)
+                if slide_value is not None:
+                    slide_value = str(slide_value).strip()
+                    if not slide_value:
+                        slide_value = None
+
+            if slide_value:
+                region_key = f"{slide_value}::{base_region_id}"
+            else:
+                region_key = base_region_id
+
+            entry = regions.setdefault(region_key, RegionState())
+            _accumulate_metadata(entry, metadata, magnification, str(base_region_id), slide_value)
             if text_value and not entry.texts:
                 entry.texts.append(text_value)
+
+            if label_column:
+                label_value = None
+                if isinstance(csv_row, Mapping):
+                    label_value = csv_row.get(label_column)
+                if label_value is None:
+                    label_value = metadata.get(label_column)
+                if label_value is not None:
+                    if isinstance(label_value, str):
+                        label_value = label_value.strip()
+                    entry.labels.add(str(label_value))
 
             entry.magnification_embeddings[magnification] = image_embeddings[idx]
 
@@ -315,6 +360,9 @@ def extract_musk_embeddings(
     text_outputs: List[Tensor] = []
     kept_regions: List[str] = []
     per_region_metadata: List[MutableMapping[str, object]] = []
+    region_labels: List[Optional[str]] = []
+    base_region_aliases: Dict[str, List[str]] = {}
+    slide_mapping: Dict[str, List[str]] = {}
 
     for region_id, state in regions.items():
         if state.text_embedding is None:
@@ -324,6 +372,19 @@ def extract_musk_embeddings(
 
         kept_regions.append(region_id)
         text_outputs.append(state.text_embedding)
+
+        label_value: Optional[str] = None
+        if label_column:
+            label_values = sorted(state.labels)
+            if not label_values:
+                label_value = None
+            elif len(label_values) == 1:
+                label_value = label_values[0]
+            else:
+                raise ValueError(
+                    f"Region {region_id} has conflicting labels {label_values} in column '{label_column}'."
+                )
+            region_labels.append(label_value)
 
         for mag in magnifications:
             image_outputs[mag].append(state.magnification_embeddings[mag])
@@ -336,6 +397,16 @@ def extract_musk_embeddings(
             "patches": state.metadata.get("patches", {}),
             "rows": state.metadata.get("rows", []),
         }
+        if state.base_region_ids:
+            aliases = sorted(str(alias) for alias in state.base_region_ids if alias is not None)
+            metadata_entry["base_region_ids"] = aliases
+            base_region_aliases[region_id] = aliases
+        if state.slide_ids:
+            slides = sorted(str(slide) for slide in state.slide_ids if slide is not None)
+            metadata_entry["slide_ids"] = slides
+            slide_mapping[region_id] = slides
+        if label_column:
+            metadata_entry["label"] = label_value
         per_region_metadata.append(metadata_entry)
 
     if not kept_regions:
@@ -353,6 +424,14 @@ def extract_musk_embeddings(
             "per_region": per_region_metadata,
         },
     }
+
+    if base_region_aliases:
+        payload["metadata"]["base_region_ids"] = base_region_aliases
+    if slide_mapping:
+        payload["metadata"]["slide_ids"] = slide_mapping
+    if label_column:
+        payload["metadata"]["labels"] = region_labels
+        payload["metadata"]["label_column"] = label_column
 
     torch.save(payload, output_path)
 
@@ -387,6 +466,16 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--strict-files", action="store_true", help="Fail if an image path is missing on disk.")
     parser.add_argument("--filter-column", default=None, help="Optional column used to filter rows.")
     parser.add_argument("--filter-values", nargs="*", default=None, help="Explicit values to keep when filtering rows.")
+    parser.add_argument(
+        "--label-column",
+        default=None,
+        help="CSV column containing region labels to store alongside the extracted features.",
+    )
+    parser.add_argument(
+        "--slide-column",
+        default=None,
+        help="CSV column identifying the slide for each region (used to disambiguate region IDs).",
+    )
 
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -459,6 +548,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         num_workers=args.num_workers,
         dataset_kwargs=dataset_kwargs,
         metadata_json=args.metadata_json,
+        label_column=args.label_column,
+        slide_column=args.slide_column,
     )
 
 
