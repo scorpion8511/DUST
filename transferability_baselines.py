@@ -648,6 +648,40 @@ def load_single_features(path: str, manifest: Optional[str], label_column: Optio
     return FeatureBundle(embeddings=embeddings, labels=labels, label_names=label_names, metadata=payload)
 
 
+def _labels_from_metadata(metadata: Mapping[str, object], region_ids: Sequence[str]) -> Tuple[Optional[np.ndarray], Optional[Dict[int, str]], Optional[str]]:
+    raw_labels = metadata.get("labels")
+    if not raw_labels:
+        return None, None, None
+    if len(raw_labels) != len(region_ids):
+        warnings.warn(
+            "Metadata labels do not match the number of regions; ignoring stored labels.",
+            RuntimeWarning,
+        )
+        return None, None, None
+
+    processed: List[str] = []
+    for value in raw_labels:
+        if value is None:
+            warnings.warn(
+                "Metadata labels contain missing entries; ignoring stored labels.",
+                RuntimeWarning,
+            )
+            return None, None, None
+        processed.append(str(value).strip())
+
+    unique_labels = sorted(set(processed))
+    if len(unique_labels) < 2:
+        warnings.warn(
+            "Metadata labels collapse to a single class; metrics will fall back to manifest labels if available.",
+            RuntimeWarning,
+        )
+    mapping = {label: idx for idx, label in enumerate(unique_labels)}
+    numeric = np.asarray([mapping[label] for label in processed], dtype=np.int64)
+    reverse = {idx: label for label, idx in mapping.items()}
+    label_column = metadata.get("label_column")
+    return numeric, reverse, str(label_column) if label_column is not None else None
+
+
 def load_multimodal_features(
     path: str,
     manifest: Optional[str],
@@ -670,10 +704,13 @@ def load_multimodal_features(
     csv_mapping: Dict[str, Sequence[str]] = metadata.get("csv_region_mapping", {})
 
     manifest_df = _load_manifest(manifest)
-    labels: Optional[np.ndarray] = None
-    label_names: Optional[Dict[int, str]] = None
-    used_column: Optional[str] = None
-    if manifest_df is not None:
+    labels: Optional[np.ndarray]
+    label_names: Optional[Dict[int, str]]
+    used_column: Optional[str]
+
+    labels, label_names, used_column = _labels_from_metadata(metadata, region_ids)
+
+    if labels is None and manifest_df is not None:
         labels, label_names, used_column = _resolve_labels_from_manifest(
             manifest_df,
             label_column,
@@ -689,6 +726,9 @@ def load_multimodal_features(
             )
         if labels is None:
             warnings.warn("Unable to resolve labels from manifest; metrics requiring labels will be skipped")
+
+    if labels is not None and label_names is None:
+        label_names = {int(idx): str(name) for idx, name in enumerate(sorted(set(labels.tolist())))}
 
     bundles: Dict[int, FeatureBundle] = {}
     for mag in magnifications:
