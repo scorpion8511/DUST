@@ -1085,10 +1085,9 @@ def evaluate_multimodal_dataset(
             )
             _print_results(f"{dataset} :: {model_name} [{key}]", per_outputs[key])
 
-        text_metrics = [metric for metric in metrics if metric != "iimm"]
         per_outputs["text"] = evaluate_metrics(
             text_bundle,
-            text_metrics,
+            metrics,
             gaussian_type=gaussian_type,
             emms_backend=emms_backend,
             emms_model=emms_model,
