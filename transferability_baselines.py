@@ -70,6 +70,7 @@ class FeatureBundle:
     labels: Optional[np.ndarray]
     label_names: Optional[Dict[int, str]] = None
     metadata: Optional[Mapping[str, object]] = None
+    tensor: Optional[torch.Tensor] = None
 
 
 DEFAULT_GROUND_TRUTH: Dict[str, Dict[str, float]] = {
@@ -612,7 +613,13 @@ def load_single_features(path: str, manifest: Optional[str], label_column: Optio
     payload: MutableMapping[str, object] = torch.load(path, map_location="cpu")
     if "embeddings" not in payload:
         raise KeyError("Expected 'embeddings' in feature file")
-    embeddings = _to_numpy(payload["embeddings"])
+    raw_embeddings = payload["embeddings"]
+    if isinstance(raw_embeddings, torch.Tensor):
+        tensor = raw_embeddings.detach()
+        embeddings = _to_numpy(raw_embeddings)
+    else:
+        embeddings = np.asarray(raw_embeddings, dtype=np.float32)
+        tensor = torch.as_tensor(embeddings)
     labels_tensor = payload.get("labels")
     labels: Optional[np.ndarray]
     label_names: Optional[Dict[int, str]] = None
@@ -645,7 +652,16 @@ def load_single_features(path: str, manifest: Optional[str], label_column: Optio
     else:
         labels = None
 
-    return FeatureBundle(embeddings=embeddings, labels=labels, label_names=label_names, metadata=payload)
+    if labels is not None and label_names is None:
+        label_names = {int(value): str(value) for value in sorted(set(labels.tolist()))}
+
+    return FeatureBundle(
+        embeddings=embeddings,
+        labels=labels,
+        label_names=label_names,
+        metadata=payload,
+        tensor=tensor,
+    )
 
 
 def _labels_from_metadata(metadata: Mapping[str, object], region_ids: Sequence[str]) -> Tuple[Optional[np.ndarray], Optional[Dict[int, str]], Optional[str]]:
@@ -696,7 +712,8 @@ def load_multimodal_features(
 
     image_embeddings: Dict[int, torch.Tensor] = {}
     for key, value in payload["image_embeddings"].items():
-        image_embeddings[int(key)] = value
+        tensor = value.detach() if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+        image_embeddings[int(key)] = tensor
     magnifications = sorted(image_embeddings.keys())
 
     metadata = payload.get("metadata", {})
@@ -728,18 +745,28 @@ def load_multimodal_features(
             warnings.warn("Unable to resolve labels from manifest; metrics requiring labels will be skipped")
 
     if labels is not None and label_names is None:
-        label_names = {int(idx): str(name) for idx, name in enumerate(sorted(set(labels.tolist())))}
+        label_names = {int(value): str(value) for value in sorted(set(labels.tolist()))}
 
     bundles: Dict[int, FeatureBundle] = {}
     for mag in magnifications:
-        embeddings = _to_numpy(image_embeddings[mag])
-        bundles[mag] = FeatureBundle(embeddings=embeddings, labels=labels, label_names=label_names, metadata=metadata)
+        tensor = image_embeddings[mag]
+        embeddings = _to_numpy(tensor)
+        bundles[mag] = FeatureBundle(
+            embeddings=embeddings,
+            labels=labels,
+            label_names=label_names,
+            metadata=metadata,
+            tensor=tensor,
+        )
 
+    text_raw = payload["text_embeddings"]
+    text_tensor = text_raw.detach() if isinstance(text_raw, torch.Tensor) else torch.as_tensor(text_raw)
     text_bundle = FeatureBundle(
-        embeddings=_to_numpy(payload["text_embeddings"]),
+        embeddings=_to_numpy(text_tensor),
         labels=labels,
         label_names=label_names,
         metadata=metadata,
+        tensor=text_tensor,
     )
     return bundles, text_bundle
 
@@ -749,7 +776,17 @@ def load_multimodal_features(
 # ---------------------------------------------------------------------------
 
 
-def evaluate_metrics(bundle: FeatureBundle, metrics: Sequence[str], *, gaussian_type: str, emms_backend: Optional[str], emms_model: Optional[str]) -> Dict[str, object]:
+def evaluate_metrics(
+    bundle: FeatureBundle,
+    metrics: Sequence[str],
+    *,
+    gaussian_type: str,
+    emms_backend: Optional[str],
+    emms_model: Optional[str],
+    device: torch.device,
+    label_embedding_cache: Optional[Dict[Tuple[str, Tuple[Tuple[int, str], ...]], np.ndarray]] = None,
+    iimm_batch_size: int = 10000,
+) -> Dict[str, object]:
     if bundle.embeddings.size == 0:
         raise ValueError("No embeddings found in the feature file")
     labels = bundle.labels
@@ -772,6 +809,8 @@ def evaluate_metrics(bundle: FeatureBundle, metrics: Sequence[str], *, gaussian_
                 "Only one class present after label resolution; metrics requiring labels will be reported as NaN.",
                 RuntimeWarning,
             )
+
+    cache = label_embedding_cache if label_embedding_cache is not None else {}
 
     for metric in metrics:
         if metric == "gbc":
@@ -814,7 +853,15 @@ def evaluate_metrics(bundle: FeatureBundle, metrics: Sequence[str], *, gaussian_
             if not bundle.label_names:
                 warnings.warn("Skipping EMMS because label names are unavailable")
                 continue
-            embeddings = _resolve_label_embeddings(bundle.label_names, backend=emms_backend, model_name=emms_model)
+            embeddings = _cached_label_embeddings(
+                bundle.label_names,
+                backend=emms_backend,
+                model_name=emms_model,
+                cache=cache,
+            )
+            if embeddings is None:
+                warnings.warn("Unable to resolve label embeddings for EMMS; skipping", RuntimeWarning)
+                continue
             results["emms"] = emms_score(feature_matrix, embeddings)
         elif metric == "ncti":
             if label_array is None:
@@ -836,6 +883,37 @@ def evaluate_metrics(bundle: FeatureBundle, metrics: Sequence[str], *, gaussian_
                 results["h_score"] = float("nan")
                 continue
             results["h_score"] = h_score(feature_matrix, label_array)
+        elif metric == "iimm":
+            if label_array is None:
+                warnings.warn("Skipping IIMM because labels are unavailable")
+                continue
+            if not bundle.label_names:
+                warnings.warn("Skipping IIMM because label names are unavailable")
+                continue
+            embeddings = _cached_label_embeddings(
+                bundle.label_names,
+                backend=emms_backend,
+                model_name=emms_model,
+                cache=cache,
+            )
+            if embeddings is None:
+                warnings.warn("Unable to resolve label embeddings for IIMM; skipping", RuntimeWarning)
+                continue
+            image_tensor = bundle.tensor if bundle.tensor is not None else torch.as_tensor(feature_matrix, dtype=torch.float32)
+            image_tensor = image_tensor.to(device=device, dtype=torch.float32)
+            label_tensor = torch.as_tensor(label_array, device=device, dtype=torch.long)
+            label_tensor = label_tensor.view(-1)
+            label_embeddings_tensor = torch.as_tensor(embeddings, device=device, dtype=image_tensor.dtype)
+            try:
+                results["iimm"] = iimm_score(
+                    image_tensor,
+                    label_embeddings_tensor,
+                    label_tensor,
+                    batch_size=iimm_batch_size,
+                )
+            except ValueError as exc:
+                warnings.warn(f"IIMM computation failed: {exc}", RuntimeWarning)
+                results["iimm"] = float("nan")
         else:
             raise ValueError(f"Unknown metric '{metric}'")
     return {key: float(value) for key, value in results.items()}
@@ -872,6 +950,8 @@ def evaluate_single_dataset(
     gaussian_type: str,
     emms_backend: Optional[str],
     emms_model: Optional[str],
+    device: torch.device,
+    iimm_batch_size: int,
 ) -> Dict[str, object]:
     if dataset not in DEFAULT_SINGLE_DATASET_MODEL_PATHS:
         raise ValueError(f"Unknown dataset '{dataset}' for single-modality evaluation")
@@ -880,6 +960,8 @@ def evaluate_single_dataset(
 
     raw_results: Dict[str, Dict[str, float]] = {}
     metric_scores: Dict[str, Dict[str, float]] = {}
+
+    label_embedding_cache: Dict[Tuple[str, Tuple[Tuple[int, str], ...]], np.ndarray] = {}
 
     for model_name, config in models.items():
         manifest = None
@@ -895,6 +977,9 @@ def evaluate_single_dataset(
             gaussian_type=gaussian_type,
             emms_backend=emms_backend,
             emms_model=emms_model,
+            device=device,
+            label_embedding_cache=label_embedding_cache,
+            iimm_batch_size=iimm_batch_size,
         )
         raw_results[model_name] = model_results
         _print_results(f"{dataset} :: {model_name}", model_results)
@@ -927,6 +1012,8 @@ def evaluate_multimodal_dataset(
     label_column: str = "subtype",
     region_column: str = "patch_id",
     magnification_column: str = "patch_scale",
+    device: torch.device,
+    iimm_batch_size: int,
 ) -> Dict[str, object]:
     if dataset not in DEFAULT_DATASET_MODEL_PATHS:
         raise ValueError(f"Unknown dataset '{dataset}' for multimodal evaluation")
@@ -936,6 +1023,8 @@ def evaluate_multimodal_dataset(
     raw_outputs: Dict[str, Dict[str, Dict[str, float]]] = {}
     aggregated_scores: Dict[str, Dict[str, float]] = {}
     metric_scores: Dict[str, Dict[str, float]] = {}
+
+    label_embedding_cache: Dict[Tuple[str, Tuple[Tuple[int, str], ...]], np.ndarray] = {}
 
     for model_name, feature_path in models.items():
         image_bundles, text_bundle = load_multimodal_features(
@@ -955,15 +1044,22 @@ def evaluate_multimodal_dataset(
                 gaussian_type=gaussian_type,
                 emms_backend=emms_backend,
                 emms_model=emms_model,
+                device=device,
+                label_embedding_cache=label_embedding_cache,
+                iimm_batch_size=iimm_batch_size,
             )
             _print_results(f"{dataset} :: {model_name} [{key}]", per_outputs[key])
 
+        text_metrics = [metric for metric in metrics if metric != "iimm"]
         per_outputs["text"] = evaluate_metrics(
             text_bundle,
-            metrics,
+            text_metrics,
             gaussian_type=gaussian_type,
             emms_backend=emms_backend,
             emms_model=emms_model,
+            device=device,
+            label_embedding_cache=label_embedding_cache,
+            iimm_batch_size=iimm_batch_size,
         )
         _print_results(f"{dataset} :: {model_name} [text]", per_outputs["text"])
 
@@ -1029,6 +1125,96 @@ def _resolve_label_embeddings(label_names: Mapping[int, str], *, backend: Option
     raise ValueError(f"Unsupported EMMS backend '{backend}'")
 
 
+def _cached_label_embeddings(
+    label_names: Mapping[int, str],
+    *,
+    backend: Optional[str],
+    model_name: Optional[str],
+    cache: Optional[Dict[Tuple[str, Tuple[Tuple[int, str], ...]], np.ndarray]] = None,
+) -> Optional[np.ndarray]:
+    if not label_names:
+        return None
+    key = (
+        (backend or "clip"),
+        model_name or "",
+        tuple((int(idx), str(label_names[idx])) for idx in sorted(label_names)),
+    )
+    if cache is not None and key in cache:
+        return cache[key]
+    embeddings = _resolve_label_embeddings(label_names, backend=backend, model_name=model_name)
+    if cache is not None:
+        cache[key] = embeddings
+    return embeddings
+
+
+def _torch_nanmean(tensor: torch.Tensor, dim: int) -> torch.Tensor:
+    mask = ~torch.isnan(tensor)
+    replaced = torch.where(mask, tensor, torch.zeros_like(tensor))
+    counts = mask.sum(dim=dim)
+    zero_mask = counts == 0
+    counts = torch.where(zero_mask, torch.ones_like(counts), counts)
+    mean = replaced.sum(dim=dim) / counts
+    return torch.where(zero_mask, torch.full_like(mean, float("nan")), mean)
+
+
+def _pairwise_inter(embeddings: torch.Tensor, batch_size: int = 10000) -> torch.Tensor:
+    num_samples = embeddings.shape[0]
+    if num_samples < 2:
+        return torch.full((), float("nan"), device=embeddings.device, dtype=embeddings.dtype)
+
+    total = torch.zeros((), device=embeddings.device, dtype=embeddings.dtype)
+    count = 0
+    for start in range(0, num_samples, batch_size):
+        batch = embeddings[start : start + batch_size]
+        sim = batch @ batch.T
+        mask = torch.tril(torch.ones(sim.shape, device=sim.device, dtype=torch.bool), diagonal=-1)
+        vals = sim[mask]
+        total += vals.sum()
+        count += vals.numel()
+        offset = start + batch_size
+        if offset >= num_samples:
+            continue
+        for other_start in range(offset, num_samples, batch_size):
+            other = embeddings[other_start : other_start + batch_size]
+            vals = batch @ other.T
+            total += vals.sum()
+            count += vals.numel()
+    if count == 0:
+        return torch.full((), float("nan"), device=embeddings.device, dtype=embeddings.dtype)
+    return total / count
+
+
+def iimm_score(
+    image_embeddings: torch.Tensor,
+    label_embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    batch_size: int = 10000,
+) -> float:
+    if image_embeddings.ndim != 2 or label_embeddings.ndim != 2:
+        raise ValueError("IIMM expects 2D embedding tensors")
+    if image_embeddings.shape[1] != label_embeddings.shape[1]:
+        raise ValueError("Image and label embeddings must share the same dimensionality")
+    if labels.numel() != image_embeddings.shape[0]:
+        raise ValueError("Label count must match the number of image embeddings for IIMM")
+    if label_embeddings.shape[0] <= int(labels.max().item()):
+        raise ValueError("Label embeddings do not cover all class indices")
+
+    images = torch.nn.functional.normalize(image_embeddings, dim=-1)
+    label_embs = torch.nn.functional.normalize(label_embeddings, dim=-1)
+
+    similarity = label_embs @ images.T  # [num_classes, num_samples]
+    cols = torch.arange(labels.shape[0], device=labels.device)
+    similarity[labels.long(), cols] = float("nan")
+    per_image = _torch_nanmean(similarity, dim=0)
+    intra_image = _torch_nanmean(per_image.unsqueeze(0), dim=1).squeeze(0)
+
+    inter_modal = _pairwise_inter(images, batch_size=batch_size)
+    if torch.isnan(inter_modal):
+        return float("nan")
+    return float(torch.stack([intra_image, inter_modal]).mean().item())
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1047,18 +1233,22 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     common.add_argument("--manifest", type=str, default=None, help="Optional CSV manifest used to recover labels")
     common.add_argument("--label-column", type=str, default="subtype", help="Column containing class labels in the manifest")
-    common.add_argument("--metrics", nargs="*", default=["gbc", "sfda", "transrate", "emms", "ncti", "hscore"], help="Metrics to compute")
+    common.add_argument("--metrics", nargs="*", default=["gbc", "sfda", "transrate", "emms", "ncti", "hscore", "iimm"], help="Metrics to compute")
     common.add_argument("--gaussian-type", choices=["diagonal", "spherical"], default="diagonal", help="Covariance type for GBC")
     common.add_argument("--emms-backend", choices=["clip", "bert", "gpt2"], default="clip", help="Text encoder used for EMMS")
     common.add_argument("--emms-model", type=str, default=None, help="Optional Hugging Face model identifier for EMMS")
     common.add_argument("--json", type=str, default=None, help="Optional output path for JSON results")
+    common.add_argument("--device", type=str, default="cpu", help="Torch device for GPU-enabled metrics (e.g., 'cpu', 'cuda:0')")
+    common.add_argument("--iimm-batch-size", type=int, default=10000, help="Batch size for IIMM pairwise computations")
 
     dataset_common = argparse.ArgumentParser(add_help=False)
-    dataset_common.add_argument("--metrics", nargs="*", default=["gbc", "sfda", "transrate", "emms", "ncti", "hscore"], help="Metrics to compute")
+    dataset_common.add_argument("--metrics", nargs="*", default=["gbc", "sfda", "transrate", "emms", "ncti", "hscore", "iimm"], help="Metrics to compute")
     dataset_common.add_argument("--gaussian-type", choices=["diagonal", "spherical"], default="diagonal", help="Covariance type for GBC")
     dataset_common.add_argument("--emms-backend", choices=["clip", "bert", "gpt2"], default="clip", help="Text encoder used for EMMS")
     dataset_common.add_argument("--emms-model", type=str, default=None, help="Optional Hugging Face model identifier for EMMS")
     dataset_common.add_argument("--json", type=str, default=None, help="Optional output path for JSON results")
+    dataset_common.add_argument("--device", type=str, default="cpu", help="Torch device for GPU-enabled metrics")
+    dataset_common.add_argument("--iimm-batch-size", type=int, default=10000, help="Batch size for IIMM pairwise computations")
 
     subparsers.add_parser("single", parents=[common], help="Evaluate single-modality features")
 
@@ -1092,6 +1282,12 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
     args = parser.parse_args(argv)
     metrics = args.metrics
 
+    try:
+        device = torch.device(args.device)
+    except (TypeError, RuntimeError) as exc:
+        parser.error(f"Invalid device '{args.device}': {exc}")
+    iimm_batch_size = getattr(args, "iimm_batch_size", 10000)
+
     if args.mode == "single":
         if args.features is None:
             parser.error("single mode requires a feature file path")
@@ -1102,6 +1298,9 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
             gaussian_type=args.gaussian_type,
             emms_backend=args.emms_backend,
             emms_model=args.emms_model,
+            device=device,
+            label_embedding_cache={},
+            iimm_batch_size=iimm_batch_size,
         )
         _print_results(args.features, result)
         if args.json:
@@ -1115,6 +1314,8 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
             gaussian_type=args.gaussian_type,
             emms_backend=args.emms_backend,
             emms_model=args.emms_model,
+            device=device,
+            iimm_batch_size=iimm_batch_size,
         )
         if args.json:
             _write_json(args.json, results)
@@ -1127,6 +1328,8 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
             gaussian_type=args.gaussian_type,
             emms_backend=args.emms_backend,
             emms_model=args.emms_model,
+            device=device,
+            iimm_batch_size=iimm_batch_size,
         )
         if args.json:
             _write_json(args.json, results)
@@ -1153,6 +1356,8 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
                 label_column=args.label_column,
                 region_column=args.region_column,
                 magnification_column=args.magnification_column,
+                device=device,
+                iimm_batch_size=iimm_batch_size,
             )
             if args.json:
                 _write_json(args.json, results)
@@ -1166,6 +1371,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
         magnification_column=args.magnification_column,
     )
     aggregated: Dict[str, object] = {}
+    label_embedding_cache: Dict[Tuple[str, Tuple[Tuple[int, str], ...]], np.ndarray] = {}
     for magnification, bundle in image_bundles.items():
         key = f"image_{magnification}x"
         aggregated[key] = evaluate_metrics(
@@ -1174,14 +1380,21 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
             gaussian_type=args.gaussian_type,
             emms_backend=args.emms_backend,
             emms_model=args.emms_model,
+            device=device,
+            label_embedding_cache=label_embedding_cache,
+            iimm_batch_size=iimm_batch_size,
         )
         _print_results(f"{feature_path} [image {magnification}x]", aggregated[key])
+    text_metrics = [metric for metric in metrics if metric != "iimm"]
     aggregated["text"] = evaluate_metrics(
         text_bundle,
-        metrics,
+        text_metrics,
         gaussian_type=args.gaussian_type,
         emms_backend=args.emms_backend,
         emms_model=args.emms_model,
+        device=device,
+        label_embedding_cache=label_embedding_cache,
+        iimm_batch_size=iimm_batch_size,
     )
     _print_results(f"{feature_path} [text]", aggregated["text"])
     if args.json:
