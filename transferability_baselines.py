@@ -492,6 +492,15 @@ def _resolve_labels_via_mapping(
     region_mapping: Optional[Mapping[str, Sequence[str]]],
 ) -> Optional[List[str]]:
     lookup = {str(row[region_column]).strip(): row for _, row in manifest_df.iterrows()}
+    # Build a secondary index that groups rows by their magnification-stripped
+    # identifiers so we can still resolve regions when the metadata stores only
+    # the canonical form (e.g. ``patch_0``) but the manifest enumerates entries
+    # such as ``patch_0_5x``/``patch_0_5x_10x``.
+    stripped_series = manifest_df[region_column].astype(str).map(str.strip).map(_strip_region_suffix)
+    strip_lookup: Dict[str, List[pd.Series]] = {}
+    for idx, base in stripped_series.items():
+        strip_lookup.setdefault(base, []).append(manifest_df.loc[idx])
+
     resolved: List[str] = []
     for region in region_ids:
         base_region = str(region).strip()
@@ -499,6 +508,17 @@ def _resolve_labels_via_mapping(
         label_value = None
         for opt in options:
             row = lookup.get(str(opt).strip())
+            if row is None:
+                base_opt = _strip_region_suffix(str(opt).strip())
+                candidates = strip_lookup.get(base_opt, [])
+                if candidates:
+                    row = candidates[0]
+                    if len(candidates) > 1:
+                        warnings.warn(
+                            f"Region '{base_region}' maps to multiple manifest entries for column '{column}'; "
+                            f"using the first match {base_opt!r}.",
+                            RuntimeWarning,
+                        )
             if row is not None:
                 label_value = row[column]
                 break
