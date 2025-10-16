@@ -786,6 +786,7 @@ def evaluate_metrics(
     device: torch.device,
     label_embedding_cache: Optional[Dict[Tuple[str, Tuple[Tuple[int, str], ...]], np.ndarray]] = None,
     iimm_batch_size: int = 10000,
+    label_embedding_tensor: Optional[torch.Tensor] = None,
 ) -> Dict[str, object]:
     if bundle.embeddings.size == 0:
         raise ValueError("No embeddings found in the feature file")
@@ -887,27 +888,30 @@ def evaluate_metrics(
             if label_array is None:
                 warnings.warn("Skipping IIMM because labels are unavailable")
                 continue
-            if not bundle.label_names:
-                warnings.warn("Skipping IIMM because label names are unavailable")
-                continue
-            embeddings = _cached_label_embeddings(
-                bundle.label_names,
-                backend=emms_backend,
-                model_name=emms_model,
-                cache=cache,
-            )
-            if embeddings is None:
-                warnings.warn("Unable to resolve label embeddings for IIMM; skipping", RuntimeWarning)
-                continue
+            label_embeddings_local: Optional[torch.Tensor] = None
+            if label_embedding_tensor is not None:
+                label_embeddings_local = label_embedding_tensor.to(device=device, dtype=torch.float32)
+            else:
+                if not bundle.label_names:
+                    warnings.warn("Skipping IIMM because label names are unavailable")
+                    continue
+                embeddings = _cached_label_embeddings(
+                    bundle.label_names,
+                    backend=emms_backend,
+                    model_name=emms_model,
+                    cache=cache,
+                )
+                if embeddings is None:
+                    warnings.warn("Unable to resolve label embeddings for IIMM; skipping", RuntimeWarning)
+                    continue
+                label_embeddings_local = torch.as_tensor(embeddings, device=device, dtype=torch.float32)
             image_tensor = bundle.tensor if bundle.tensor is not None else torch.as_tensor(feature_matrix, dtype=torch.float32)
             image_tensor = image_tensor.to(device=device, dtype=torch.float32)
-            label_tensor = torch.as_tensor(label_array, device=device, dtype=torch.long)
-            label_tensor = label_tensor.view(-1)
-            label_embeddings_tensor = torch.as_tensor(embeddings, device=device, dtype=image_tensor.dtype)
+            label_tensor = torch.as_tensor(label_array, device=device, dtype=torch.long).view(-1)
             try:
                 results["iimm"] = iimm_score(
                     image_tensor,
-                    label_embeddings_tensor,
+                    label_embeddings_local,
                     label_tensor,
                     batch_size=iimm_batch_size,
                 )
@@ -941,6 +945,33 @@ def _kendall_tau_per_metric(metric_scores: Mapping[str, Mapping[str, float]], gr
         tau, _ = weightedtau(predicted, reference)
         tau_results[metric] = float(tau)
     return tau_results
+
+
+def _label_prototypes_from_text_bundle(text_bundle: FeatureBundle, device: torch.device) -> Optional[torch.Tensor]:
+    if text_bundle.labels is None or text_bundle.tensor is None:
+        return None
+    if text_bundle.labels.size == 0:
+        return None
+    label_tensor = torch.as_tensor(text_bundle.labels, device=device, dtype=torch.long)
+    unique = torch.unique(label_tensor)
+    if unique.numel() < 2:
+        return None
+    embeddings = text_bundle.tensor.to(device=device, dtype=torch.float32)
+    if text_bundle.label_names:
+        order = sorted(int(idx) for idx in text_bundle.label_names.keys())
+    else:
+        order = sorted(int(idx) for idx in unique.tolist())
+    prototypes: List[torch.Tensor] = []
+    for idx in order:
+        mask = label_tensor == idx
+        if not torch.any(mask):
+            warnings.warn(
+                f"No text embeddings found for label index {idx}; unable to compute IIMM prototypes.",
+                RuntimeWarning,
+            )
+            return None
+        prototypes.append(embeddings[mask].mean(dim=0))
+    return torch.stack(prototypes, dim=0)
 
 
 def evaluate_single_dataset(
@@ -980,6 +1011,7 @@ def evaluate_single_dataset(
             device=device,
             label_embedding_cache=label_embedding_cache,
             iimm_batch_size=iimm_batch_size,
+            label_embedding_tensor=None,
         )
         raw_results[model_name] = model_results
         _print_results(f"{dataset} :: {model_name}", model_results)
@@ -1035,6 +1067,8 @@ def evaluate_multimodal_dataset(
             magnification_column=magnification_column,
         )
 
+        label_prototypes = _label_prototypes_from_text_bundle(text_bundle, device)
+
         per_outputs: Dict[str, Dict[str, float]] = {}
         for magnification, bundle in image_bundles.items():
             key = f"image_{magnification}x"
@@ -1047,6 +1081,7 @@ def evaluate_multimodal_dataset(
                 device=device,
                 label_embedding_cache=label_embedding_cache,
                 iimm_batch_size=iimm_batch_size,
+                label_embedding_tensor=label_prototypes,
             )
             _print_results(f"{dataset} :: {model_name} [{key}]", per_outputs[key])
 
@@ -1060,6 +1095,7 @@ def evaluate_multimodal_dataset(
             device=device,
             label_embedding_cache=label_embedding_cache,
             iimm_batch_size=iimm_batch_size,
+            label_embedding_tensor=label_prototypes,
         )
         _print_results(f"{dataset} :: {model_name} [text]", per_outputs["text"])
 
@@ -1301,6 +1337,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
             device=device,
             label_embedding_cache={},
             iimm_batch_size=iimm_batch_size,
+            label_embedding_tensor=None,
         )
         _print_results(args.features, result)
         if args.json:
@@ -1372,6 +1409,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
     )
     aggregated: Dict[str, object] = {}
     label_embedding_cache: Dict[Tuple[str, Tuple[Tuple[int, str], ...]], np.ndarray] = {}
+    label_prototypes = _label_prototypes_from_text_bundle(text_bundle, device)
     for magnification, bundle in image_bundles.items():
         key = f"image_{magnification}x"
         aggregated[key] = evaluate_metrics(
@@ -1383,6 +1421,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
             device=device,
             label_embedding_cache=label_embedding_cache,
             iimm_batch_size=iimm_batch_size,
+            label_embedding_tensor=label_prototypes,
         )
         _print_results(f"{feature_path} [image {magnification}x]", aggregated[key])
     text_metrics = [metric for metric in metrics if metric != "iimm"]
@@ -1395,6 +1434,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
         device=device,
         label_embedding_cache=label_embedding_cache,
         iimm_batch_size=iimm_batch_size,
+        label_embedding_tensor=label_prototypes,
     )
     _print_results(f"{feature_path} [text]", aggregated["text"])
     if args.json:
