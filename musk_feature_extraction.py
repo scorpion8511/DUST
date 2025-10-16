@@ -415,23 +415,30 @@ def extract_musk_embeddings(
     image_embeddings_stacked = {mag: torch.stack(v, dim=0) for mag, v in image_outputs.items()}
     text_embeddings_stacked = torch.stack(text_outputs, dim=0)
 
+    metadata: MutableMapping[str, object] = {
+        "region_ids": kept_regions,
+        "magnifications": magnifications,
+        "per_region": per_region_metadata,
+    }
+
+    # ``regions`` is retained for backward compatibility with earlier runs that
+    # expected this key, but new tooling reads ``region_ids`` instead.
+    metadata["regions"] = kept_regions
+
+    if base_region_aliases:
+        metadata["base_region_ids"] = base_region_aliases
+    if slide_mapping:
+        metadata["slide_ids"] = slide_mapping
+    if label_column:
+        metadata["labels"] = region_labels
+        metadata["label_column"] = label_column
+
     payload = {
         "image_embeddings": {mag: tensor for mag, tensor in image_embeddings_stacked.items()},
         "text_embeddings": text_embeddings_stacked,
-        "metadata": {
-            "regions": kept_regions,
-            "magnifications": magnifications,
-            "per_region": per_region_metadata,
-        },
+        "metadata": metadata,
+        "magnifications": magnifications,
     }
-
-    if base_region_aliases:
-        payload["metadata"]["base_region_ids"] = base_region_aliases
-    if slide_mapping:
-        payload["metadata"]["slide_ids"] = slide_mapping
-    if label_column:
-        payload["metadata"]["labels"] = region_labels
-        payload["metadata"]["label_column"] = label_column
 
     torch.save(payload, output_path)
 
