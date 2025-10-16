@@ -491,19 +491,20 @@ def _resolve_labels_via_mapping(
     region_ids: Sequence[str],
     region_mapping: Optional[Mapping[str, Sequence[str]]],
 ) -> Optional[List[str]]:
-    lookup = {str(row[region_column]): row for _, row in manifest_df.iterrows()}
+    lookup = {str(row[region_column]).strip(): row for _, row in manifest_df.iterrows()}
     resolved: List[str] = []
     for region in region_ids:
-        options = region_mapping.get(region, [region]) if region_mapping else [region]
+        base_region = str(region).strip()
+        options = region_mapping.get(base_region, [base_region]) if region_mapping else [base_region]
         label_value = None
         for opt in options:
-            row = lookup.get(str(opt))
+            row = lookup.get(str(opt).strip())
             if row is not None:
                 label_value = row[column]
                 break
         if label_value is None:
             return None
-        resolved.append(str(label_value))
+        resolved.append(str(label_value).strip())
     return resolved
 
 
@@ -513,13 +514,20 @@ def _resolve_labels_via_canonical(
     region_column: str,
     region_ids: Sequence[str],
 ) -> Optional[List[str]]:
-    stripped = manifest_df[region_column].astype(str).map(_strip_region_suffix)
+    stripped = manifest_df[region_column].astype(str).str.strip().map(_strip_region_suffix)
     resolved: List[str] = []
     for region in region_ids:
-        mask = stripped == region
+        base_region = str(region).strip()
+        mask = stripped == base_region
         if not mask.any():
             return None
-        candidates = manifest_df.loc[mask, column].dropna().astype(str).unique()
+        candidates = (
+            manifest_df.loc[mask, column]
+            .dropna()
+            .astype(str)
+            .map(str.strip)
+            .unique()
+        )
         if len(candidates) == 0:
             return None
         if len(candidates) > 1:
@@ -565,7 +573,7 @@ def _resolve_labels_from_manifest(
                     manifest_df, column, region_column, region_ids
                 )
         if resolved_values is None:
-            resolved_values = manifest_df[column].astype(str).tolist()
+            resolved_values = manifest_df[column].astype(str).map(str.strip).tolist()
 
         numeric, reverse = _build_label_map(resolved_values)
         if region_ids is not None and len(resolved_values) != len(region_ids):
