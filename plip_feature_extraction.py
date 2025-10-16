@@ -51,6 +51,7 @@ class RegionAccumulator:
     metadata: Dict[str, object] = field(
         default_factory=lambda: {"patches": {}, "samples": [], "csv_region_ids": set()}
     )
+    labels: set[str] = field(default_factory=set)
 
 
 def build_collate_fn():
@@ -86,6 +87,7 @@ def extract_plip_embeddings(
     normalize: bool,
     magnifications: Optional[Sequence[int]],
     drop_missing: bool,
+    label_column: Optional[str],
 ) -> Dict[str, object]:
     regions: "OrderedDict[str, RegionAccumulator]" = OrderedDict()
     observed_magnifications: set[int] = set()
@@ -127,6 +129,17 @@ def extract_plip_embeddings(
                 accumulator.metadata.setdefault("patches", {})[magnification] = patch
             original_id = batch["metadata"][idx].get("csv_region_id", region_id)
             accumulator.metadata.setdefault("csv_region_ids", set()).add(original_id)
+            if label_column:
+                csv_row = batch["metadata"][idx].get("csv_row")
+                label_value = None
+                if isinstance(csv_row, Mapping):
+                    label_value = csv_row.get(label_column)
+                if label_value is None:
+                    label_value = batch["metadata"][idx].get(label_column)
+                if label_value is not None:
+                    if isinstance(label_value, str):
+                        label_value = label_value.strip()
+                    accumulator.labels.add(str(label_value))
 
     if magnifications is None:
         ordered_magnifications = sorted(observed_magnifications)
@@ -143,6 +156,8 @@ def extract_plip_embeddings(
     raw_texts: List[Optional[str]] = []
     csv_region_mapping: Dict[str, List[str]] = {}
     patches = {mag: [] for mag in ordered_magnifications}
+
+    region_labels: List[Optional[str]] = []
 
     for region_id, accumulator in regions.items():
         if accumulator.text_sum is None or accumulator.text_count == 0:
@@ -171,6 +186,17 @@ def extract_plip_embeddings(
             csv_ids = {region_id}
         csv_region_mapping[region_id] = sorted(csv_ids)
 
+        if label_column:
+            label_values = sorted(accumulator.labels)
+            if not label_values:
+                region_labels.append(None)
+            elif len(label_values) == 1:
+                region_labels.append(label_values[0])
+            else:
+                raise ValueError(
+                    f"Region {region_id} has conflicting labels {label_values} in column '{label_column}'."
+                )
+
         for mag in ordered_magnifications:
             embedding = accumulator.images.get(mag)
             if embedding is None:
@@ -191,6 +217,8 @@ def extract_plip_embeddings(
         for mag in ordered_magnifications:
             if patches[mag]:
                 patches[mag].pop()
+        if label_column and region_labels:
+            region_labels.pop()
 
     if not region_ids:
         raise ValueError(
@@ -214,6 +242,9 @@ def extract_plip_embeddings(
         "patches": patches,
         "csv_region_mapping": csv_region_mapping,
     }
+    if label_column:
+        metadata["labels"] = region_labels
+        metadata["label_column"] = label_column
 
     return {
         "image_embeddings": image_tensors,
@@ -233,6 +264,9 @@ def save_outputs(features: Mapping[str, object], output_path: str, metadata_json
             "csv_region_mapping": features["metadata"]["csv_region_mapping"],
             "magnifications": features["magnifications"],
         }
+        if "labels" in features["metadata"]:
+            serialisable["labels"] = features["metadata"]["labels"]
+            serialisable["label_column"] = features["metadata"].get("label_column")
         with open(metadata_json, "w", encoding="utf-8") as handle:
             json.dump(serialisable, handle, indent=2)
 
@@ -313,6 +347,12 @@ def build_argparser() -> argparse.ArgumentParser:
         default=None,
         help="Optional path to write the metadata dictionary as JSON alongside the .pth archive.",
     )
+    parser.add_argument(
+        "--label-column",
+        type=str,
+        default=None,
+        help="Optional CSV column to record class labels alongside the extracted embeddings.",
+    )
 
     return parser
 
@@ -359,6 +399,7 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         normalize=args.normalize,
         magnifications=args.magnifications,
         drop_missing=args.drop_missing,
+        label_column=args.label_column,
     )
 
     metadata = features.get("metadata")
