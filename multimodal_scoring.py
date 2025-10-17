@@ -588,6 +588,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
         collected_scores[model_name] = {
             "msci": float(msci_result.msci),
             "cmi_lb_mean": cmi_avg,
+            "cmi_lb_per_mag": {mag: float(cmi_results[mag].cmi_lb) for mag in magnifications},
         }
 
         print("--- MSCI ---")
@@ -656,6 +657,23 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
         else:
             print(
                 "Unable to derive combined MSCI/CMI-LB weights for benchmarking; insufficient ground-truth overlap."
+            )
+
+        # Evaluate per-magnification CMI-LB correlations
+        per_mag_scores: Dict[int, Dict[str, float]] = {}
+        for name, scores in collected_scores.items():
+            per_mag = scores.get("cmi_lb_per_mag", {})
+            if not isinstance(per_mag, Mapping):
+                continue
+            for mag, value in per_mag.items():
+                per_mag_scores.setdefault(int(mag), {})[name] = float(value)
+
+        for mag in sorted(per_mag_scores):
+            tau_mag = _compute_weighted_kendall_tau(per_mag_scores[mag], gt)
+            if tau_mag is None:
+                continue
+            print(
+                f"Kendall tau_w (CMI-LB at {mag}x vs ground truth) for {dataset}: {tau_mag:.6f}"
             )
 
     return aggregated_results
