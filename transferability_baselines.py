@@ -947,6 +947,15 @@ def _kendall_tau_per_metric(metric_scores: Mapping[str, Mapping[str, float]], gr
     return tau_results
 
 
+def _magnification_sort_key(key: str) -> Tuple[int, object]:
+    match = re.search(r"image_(\d+)x", key)
+    if match:
+        return (0, int(match.group(1)))
+    if key == "text":
+        return (1, 0)
+    return (2, key)
+
+
 def _label_prototypes_from_text_bundle(text_bundle: FeatureBundle, device: torch.device) -> Optional[torch.Tensor]:
     if text_bundle.labels is None or text_bundle.tensor is None:
         return None
@@ -1055,6 +1064,7 @@ def evaluate_multimodal_dataset(
     raw_outputs: Dict[str, Dict[str, Dict[str, float]]] = {}
     aggregated_scores: Dict[str, Dict[str, float]] = {}
     metric_scores: Dict[str, Dict[str, float]] = {}
+    magnification_metric_scores: Dict[str, Dict[str, Dict[str, float]]] = {}
 
     label_embedding_cache: Dict[Tuple[str, Tuple[Tuple[int, str], ...]], np.ndarray] = {}
 
@@ -1084,6 +1094,8 @@ def evaluate_multimodal_dataset(
                 label_embedding_tensor=label_prototypes,
             )
             _print_results(f"{dataset} :: {model_name} [{key}]", per_outputs[key])
+            for metric_name, value in per_outputs[key].items():
+                magnification_metric_scores.setdefault(key, {}).setdefault(metric_name, {})[model_name] = float(value)
 
         per_outputs["text"] = evaluate_metrics(
             text_bundle,
@@ -1097,6 +1109,8 @@ def evaluate_multimodal_dataset(
             label_embedding_tensor=label_prototypes,
         )
         _print_results(f"{dataset} :: {model_name} [text]", per_outputs["text"])
+        for metric_name, value in per_outputs["text"].items():
+            magnification_metric_scores.setdefault("text", {}).setdefault(metric_name, {})[model_name] = float(value)
 
         raw_outputs[model_name] = per_outputs
         aggregated = _aggregate_metric_dict(per_outputs)
@@ -1109,16 +1123,28 @@ def evaluate_multimodal_dataset(
             metric_scores.setdefault(metric_name, {})[model_name] = float(value)
 
     tau_scores = _kendall_tau_per_metric(metric_scores, ground_truth)
+    tau_by_magnification: Dict[str, Dict[str, float]] = {}
+    for magnification_key, metrics_map in magnification_metric_scores.items():
+        tau_by_magnification[magnification_key] = _kendall_tau_per_metric(metrics_map, ground_truth)
 
     if tau_scores:
         print(f"\nKendall tau against ground truth ({dataset}):")
         for metric_name, tau in tau_scores.items():
             print(f"  {metric_name}: {tau}")
 
+    if tau_by_magnification:
+        print(f"\nKendall tau by magnification ({dataset}):")
+        for magnification_key in sorted(tau_by_magnification, key=_magnification_sort_key):
+            per_metric = tau_by_magnification[magnification_key]
+            print(f"  {magnification_key}:")
+            for metric_name, tau in per_metric.items():
+                print(f"    {metric_name}: {tau}")
+
     return {
         "models": raw_outputs,
         "aggregated": aggregated_scores,
         "tau": tau_scores,
+        "tau_by_magnification": tau_by_magnification,
         "ground_truth": ground_truth,
     }
 
