@@ -416,7 +416,15 @@ def compute_msci_single_modality(
     label_column: str | None = "label",
     magnifications: Sequence[Any] | None = None,
 ) -> MSCIResult:
-    """Compute single-modality MSCI by comparing magnification means per region."""
+    """Compute single-modality MSCI by comparing magnification means per region.
+
+    When label information is available the routine mirrors the multimodal MSCI
+    variant by comparing per-magnification means against label prototypes
+    derived from the training split.  If labels are unavailable (for example
+    when only raw embeddings are supplied) the metric falls back to using a
+    region-wise centroid computed from all available magnifications so that MSCI
+    can still quantify cross-scale consistency.
+    """
 
     if "embeddings" not in eval_features:
         raise KeyError("Evaluation features must contain an 'embeddings' entry")
@@ -438,72 +446,70 @@ def compute_msci_single_modality(
         label_column=label_column,
     )
 
-    if not eval_label_column:
-        raise ValueError(
-            "Label information is required in the evaluation manifest to compute MSCI."
-        )
-
-    train_manifest: pd.DataFrame | None = None
-    train_label_column: str | None = eval_label_column
-
-    try:
-        train_manifest, _, _, train_label_column = _resolve_manifest(
-            train_features,
-            train_embeddings,
-            manifest_source,
-            region_column,
-            magnification_column,
-            label_column=eval_label_column,
-        )
-    except ValueError:
-        metadata_manifest = _metadata_from_features(
-            train_embeddings,
-            train_features,
-            region_column,
-            magnification_column,
-            label_column=eval_label_column,
-        )
-        if metadata_manifest is not None and len(metadata_manifest) == train_embeddings.shape[0]:
-            train_manifest = metadata_manifest
-        else:
-            train_manifest = None
-
     eval_labels = _extract_labels(
         eval_features, eval_manifest, eval_label_column, eval_embeddings.shape[0]
     )
-    if eval_labels is None:
-        raise ValueError(
-            "Evaluation labels could not be resolved for MSCI computation. Ensure the manifest or feature payload contains label information."
-        )
-
-    train_labels = _extract_labels(
-        train_features,
-        train_manifest,
-        train_label_column,
-        train_embeddings.shape[0],
-    )
-    if train_labels is None:
-        raise ValueError(
-            "Training labels are required to compute label prototypes for MSCI."
-        )
-
-    label_vectors: Dict[str, list[torch.Tensor]] = {}
-    for vector, label in zip(train_embeddings, train_labels):
-        label_vectors.setdefault(label, []).append(vector)
+    use_labels = eval_labels is not None
 
     label_prototypes: Dict[str, torch.Tensor] = {}
-    for label, vectors in label_vectors.items():
-        stacked = torch.stack(vectors, dim=0)
-        proto = stacked.mean(dim=0)
-        norm = torch.norm(proto)
-        if torch.isnan(norm) or float(norm.item()) == 0.0:
-            continue
-        label_prototypes[label] = proto / norm
+    if use_labels:
+        train_manifest: pd.DataFrame | None = None
+        train_label_column: str | None = eval_label_column
 
-    if not label_prototypes:
-        raise ValueError(
-            "Unable to compute label prototypes from the training embeddings for MSCI."
+        try:
+            train_manifest, _, _, train_label_column = _resolve_manifest(
+                train_features,
+                train_embeddings,
+                manifest_source,
+                region_column,
+                magnification_column,
+                label_column=eval_label_column,
+            )
+        except ValueError:
+            metadata_manifest = _metadata_from_features(
+                train_embeddings,
+                train_features,
+                region_column,
+                magnification_column,
+                label_column=eval_label_column,
+            )
+            if metadata_manifest is not None and len(metadata_manifest) == train_embeddings.shape[0]:
+                train_manifest = metadata_manifest
+            else:
+                train_manifest = None
+
+        train_labels = _extract_labels(
+            train_features,
+            train_manifest,
+            train_label_column,
+            train_embeddings.shape[0],
         )
+        if train_labels is None:
+            warnings.warn(
+                "Training labels unavailable; falling back to label-free MSCI computation.",
+                RuntimeWarning,
+            )
+            use_labels = False
+        else:
+            label_vectors: Dict[str, list[torch.Tensor]] = {}
+            for vector, label in zip(train_embeddings, train_labels):
+                label_vectors.setdefault(label, []).append(vector)
+
+            for label, vectors in label_vectors.items():
+                stacked = torch.stack(vectors, dim=0)
+                proto = stacked.mean(dim=0)
+                norm = torch.norm(proto)
+                if torch.isnan(norm) or float(norm.item()) == 0.0:
+                    continue
+                label_prototypes[label] = proto / norm
+
+            if not label_prototypes:
+                warnings.warn(
+                    "Unable to derive label prototypes; falling back to label-free MSCI computation.",
+                    RuntimeWarning,
+                )
+                use_labels = False
+
 
     region_embeddings: Dict[str, Dict[str, Any]] = {}
     available_magnifications: set[int] = set()
@@ -524,23 +530,44 @@ def compute_msci_single_modality(
         mag_int, _ = _coerce_magnification_int(mag_value)
         if mag_int is None:
             continue
-        label = eval_labels[idx]
-        if label not in label_prototypes:
-            continue
         entry = region_embeddings.setdefault(
-            region, {"label": label, "magnifications": {}}
+            region,
+            {"label": None, "label_conflict": False, "magnifications": {}},
         )
-        if entry["label"] != label:
-            warnings.warn(
-                f"Region '{region}' has inconsistent labels; skipping conflicting entry.",
-                RuntimeWarning,
-            )
-            continue
+        if use_labels and eval_labels is not None:
+            label = eval_labels[idx]
+            if entry["label"] is None:
+                entry["label"] = label
+            elif entry["label"] != label:
+                warnings.warn(
+                    f"Region '{region}' has inconsistent labels; ignoring label information for this region.",
+                    RuntimeWarning,
+                )
+                entry["label_conflict"] = True
         entry["magnifications"].setdefault(mag_int, []).append(eval_embeddings[idx])
         available_magnifications.add(mag_int)
 
     if not region_embeddings:
         raise ValueError("No region information available to compute MSCI")
+
+    if use_labels and eval_labels is not None:
+        filtered: Dict[str, Dict[str, Any]] = {}
+        for region, info in region_embeddings.items():
+            if info.get("label_conflict"):
+                continue
+            label = info.get("label")
+            if not label or label not in label_prototypes:
+                continue
+            filtered[region] = info
+
+        if filtered:
+            region_embeddings = filtered
+        else:
+            warnings.warn(
+                "No regions retained after resolving label prototypes; falling back to label-free MSCI computation.",
+                RuntimeWarning,
+            )
+            use_labels = False
 
     if magnifications is not None:
         requested: list[int] = []
@@ -574,9 +601,6 @@ def compute_msci_single_modality(
     regions_total = len(region_embeddings)
 
     for region, info in region_embeddings.items():
-        label = info.get("label")
-        if not label or label not in label_prototypes:
-            continue
         mag_dict = info.get("magnifications", {})
         if magnifications is not None:
             for mag in requested_set:
@@ -590,8 +614,21 @@ def compute_msci_single_modality(
         if len(available_for_region) < 2:
             continue
 
-        averaged_vectors: list[torch.Tensor] = []
-        prototype = label_prototypes[label]
+        prototype: torch.Tensor | None = None
+        if use_labels and info.get("label") in label_prototypes:
+            prototype = label_prototypes[info["label"]]
+        elif not use_labels:
+            all_vectors = [vec for vectors in mag_dict.values() for vec in vectors]
+            if len(all_vectors) < 1:
+                continue
+            stacked_all = torch.stack(all_vectors, dim=0)
+            centroid = stacked_all.mean(dim=0)
+            norm_centroid = torch.norm(centroid)
+            if torch.isnan(norm_centroid) or float(norm_centroid.item()) == 0.0:
+                continue
+            prototype = centroid / norm_centroid
+        else:
+            continue
 
         sims: list[torch.Tensor] = []
         for mag in available_for_region:
