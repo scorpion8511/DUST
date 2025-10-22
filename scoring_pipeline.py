@@ -434,6 +434,7 @@ def compute_msci_single_modality(
     magnification_column: str = "magnification",
     label_column: str | None = "label",
     magnifications: Sequence[Any] | None = None,
+    use_labels: bool = True,
 ) -> MSCIResult:
     """Compute single-modality MSCI by comparing magnification means per region.
 
@@ -456,22 +457,27 @@ def compute_msci_single_modality(
     if eval_embeddings.ndim != 2 or train_embeddings.ndim != 2:
         raise ValueError("Embeddings must be 2D arrays of shape (N, D)")
 
+    label_column_for_manifest = label_column if use_labels else None
     eval_manifest, region_column, magnification_column, eval_label_column = _resolve_manifest(
         eval_features,
         eval_embeddings,
         manifest_source,
         region_column,
         magnification_column,
-        label_column=label_column,
+        label_column=label_column_for_manifest,
     )
 
-    eval_labels = _extract_labels(
-        eval_features, eval_manifest, eval_label_column, eval_embeddings.shape[0]
+    eval_labels = (
+        _extract_labels(
+            eval_features, eval_manifest, eval_label_column, eval_embeddings.shape[0]
+        )
+        if use_labels
+        else None
     )
-    use_labels = eval_labels is not None
+    use_label_prototypes = use_labels and eval_labels is not None
 
     label_prototypes: Dict[str, torch.Tensor] = {}
-    if use_labels:
+    if use_label_prototypes:
         train_manifest: pd.DataFrame | None = None
         train_label_column: str | None = eval_label_column
 
@@ -497,18 +503,22 @@ def compute_msci_single_modality(
             else:
                 train_manifest = None
 
-        train_labels = _extract_labels(
-            train_features,
-            train_manifest,
-            train_label_column,
-            train_embeddings.shape[0],
+        train_labels = (
+            _extract_labels(
+                train_features,
+                train_manifest,
+                train_label_column,
+                train_embeddings.shape[0],
+            )
+            if use_label_prototypes
+            else None
         )
         if train_labels is None:
             warnings.warn(
                 "Training labels unavailable; falling back to label-free MSCI computation.",
                 RuntimeWarning,
             )
-            use_labels = False
+            use_label_prototypes = False
         else:
             label_vectors: Dict[str, list[torch.Tensor]] = {}
             for vector, label in zip(train_embeddings, train_labels):
@@ -527,7 +537,7 @@ def compute_msci_single_modality(
                     "Unable to derive label prototypes; falling back to label-free MSCI computation.",
                     RuntimeWarning,
                 )
-                use_labels = False
+                use_label_prototypes = False
 
 
     region_embeddings: Dict[str, Dict[str, Any]] = {}
@@ -553,7 +563,7 @@ def compute_msci_single_modality(
             region,
             {"label": None, "label_conflict": False, "magnifications": {}},
         )
-        if use_labels and eval_labels is not None:
+        if use_label_prototypes and eval_labels is not None:
             label = eval_labels[idx]
             if entry["label"] is None:
                 entry["label"] = label
@@ -569,7 +579,7 @@ def compute_msci_single_modality(
     if not region_embeddings:
         raise ValueError("No region information available to compute MSCI")
 
-    if use_labels and eval_labels is not None:
+    if use_label_prototypes and eval_labels is not None:
         filtered: Dict[str, Dict[str, Any]] = {}
         for region, info in region_embeddings.items():
             if info.get("label_conflict"):
@@ -586,7 +596,7 @@ def compute_msci_single_modality(
                 "No regions retained after resolving label prototypes; falling back to label-free MSCI computation.",
                 RuntimeWarning,
             )
-            use_labels = False
+            use_label_prototypes = False
 
     if magnifications is not None:
         requested: list[int] = []
@@ -634,9 +644,9 @@ def compute_msci_single_modality(
             continue
 
         prototype: torch.Tensor | None = None
-        if use_labels and info.get("label") in label_prototypes:
+        if use_label_prototypes and info.get("label") in label_prototypes:
             prototype = label_prototypes[info["label"]]
-        elif not use_labels:
+        elif not use_label_prototypes:
             all_vectors = [vec for vectors in mag_dict.values() for vec in vectors]
             if len(all_vectors) < 1:
                 continue
@@ -770,6 +780,8 @@ def compute_gabor_scores_from_paths(
             msci_params["label_column"] = msci_config.get("label_column")
         if msci_config.get("magnifications") is not None:
             msci_params["magnifications"] = msci_config.get("magnifications")
+        if msci_config.get("use_labels") is not None:
+            msci_params["use_labels"] = bool(msci_config.get("use_labels"))
 
     region_column = msci_params.get("region_column") or _resolve_column(
         "region_column", (train, evald), "region_id"
@@ -777,12 +789,17 @@ def compute_gabor_scores_from_paths(
     magnification_column = msci_params.get("magnification_column") or _resolve_column(
         "magnification_column", (train, evald), "magnification"
     )
-    label_column = msci_params.get("label_column") or _resolve_column(
-        "label_column", (train, evald), "label"
-    )
+    use_labels_flag = bool(msci_params.get("use_labels", True))
+    if use_labels_flag:
+        label_column = msci_params.get("label_column") or _resolve_column(
+            "label_column", (train, evald), "label"
+        )
+        msci_params.setdefault("label_column", label_column)
+    else:
+        label_column = None
+        msci_params.pop("label_column", None)
     msci_params.setdefault("region_column", region_column)
     msci_params.setdefault("magnification_column", magnification_column)
-    msci_params.setdefault("label_column", label_column)
 
     def _build_msci_payload(
         payloads: Sequence[Mapping[str, Any]]
@@ -877,8 +894,9 @@ def compute_gabor_scores_from_paths(
             manifest_source,
             region_column=msci_params.get("region_column", "region_id"),
             magnification_column=msci_params.get("magnification_column", "magnification"),
-            label_column=msci_params.get("label_column"),
+            label_column=label_column,
             magnifications=msci_params.get("magnifications"),
+            use_labels=use_labels_flag,
         )
         scores["msci"] = result.score
         scores["msci_mean_variance"] = result.mean_variance
