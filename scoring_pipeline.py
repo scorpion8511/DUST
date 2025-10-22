@@ -214,20 +214,20 @@ def _metadata_from_features(
         magnification_column: mags,
     }
 
-    label_values: Sequence[Any] | None = None
-    label_name = label_column
+    if label_column:
+        label_values: Sequence[Any] | None = None
+        label_name = label_column
 
-    if label_column and label_column in features:
-        label_values = features[label_column]
-    elif "labels" in features:
-        label_values = features["labels"]
-        if not label_name:
+        if label_column in features:
+            label_values = features[label_column]
+        elif "labels" in features:
+            label_values = features["labels"]
             label_name = "labels"
 
-    if label_values is not None:
-        label_array = np.asarray(label_values)
-        if label_array.shape[0] == embeddings.shape[0]:
-            data[label_name or "labels"] = label_array.tolist()
+        if label_values is not None:
+            label_array = np.asarray(label_values)
+            if label_array.shape[0] == embeddings.shape[0]:
+                data[label_name or "labels"] = label_array.tolist()
 
     row_indices = features.get("row_indices")
     if row_indices is not None and len(row_indices) == embeddings.shape[0]:
