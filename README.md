@@ -84,6 +84,30 @@ requested magnification set. This keeps the unimodal evaluation
 comparable to the multimodal MSCI metric while preserving the original
 Gabor/Fisher outputs.
 
+### Standalone label-free MSCI utility
+
+For quick experiments where only multi-magnification image patches are
+available, `label_free_msci.py` wraps the same MSCI implementation in a
+lightweight CLI. The script accepts feature archives produced by either
+`extract_features.py` (single-modality) or the multimodal extractor and
+computes MSCI without requiring class labels:
+
+```bash
+python label_free_msci.py \
+    /path/to/features.pth \
+    --manifest /path/to/manifest.csv \
+    --region-column patch_id \
+    --magnification-column patch_scale \
+    --magnifications 5 10 20 40
+```
+
+If the feature archive already stores `region_ids` and `magnifications` arrays
+no manifest is required.  You can also provide `--train-features` when a
+separate training split is available; otherwise the evaluation file is reused
+for both arguments.  The command prints the MSCI score, mean variance, and the
+number of regions contributing to the metric, and an optional `--json` flag
+emits a serialised summary for downstream analysis.
+
 ## Multimodal feature extraction
 
 `multimodal_feature_extraction.py` converts an image-text CSV manifest into the
