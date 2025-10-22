@@ -108,6 +108,29 @@ def _coerce_magnification_int(value: Any) -> Tuple[int | None, str]:
     return int(numeric), canon
 
 
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Return ``value`` interpreted as a boolean.
+
+    Strings such as ``"false"``/``"0"`` are mapped to ``False`` while numeric
+    and other truthy values follow Python's default truthiness semantics.
+    """
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+    return bool(value)
+
+
 # Match one-or-more trailing magnification tokens such as ``_5x`` or ``-20×``.
 # The ``x``/``×`` suffix is mandatory so identifiers like ``patch_0`` remain
 # untouched while strings like ``patch_0_5x`` collapse to ``patch_0``.
@@ -780,8 +803,19 @@ def compute_gabor_scores_from_paths(
             msci_params["label_column"] = msci_config.get("label_column")
         if msci_config.get("magnifications") is not None:
             msci_params["magnifications"] = msci_config.get("magnifications")
-        if msci_config.get("use_labels") is not None:
-            msci_params["use_labels"] = bool(msci_config.get("use_labels"))
+
+        use_labels_value: Any | None = None
+        if "use_labels" in msci_config and msci_config.get("use_labels") is not None:
+            use_labels_value = _coerce_bool(msci_config.get("use_labels"))
+        elif "use_lables" in msci_config and msci_config.get("use_lables") is not None:
+            warnings.warn(
+                "Detected 'use_lables' in MSCI configuration; treating it as 'use_labels'.",
+                RuntimeWarning,
+            )
+            use_labels_value = _coerce_bool(msci_config.get("use_lables"))
+
+        if use_labels_value is not None:
+            msci_params["use_labels"] = use_labels_value
 
     region_column = msci_params.get("region_column") or _resolve_column(
         "region_column", (train, evald), "region_id"
