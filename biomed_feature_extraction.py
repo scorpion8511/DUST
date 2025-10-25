@@ -53,6 +53,17 @@ def _maybe_login(token: Optional[str]) -> None:
         raise RuntimeError("Failed to authenticate with Hugging Face.") from exc
 
 
+DEFAULT_SLIDE_CANDIDATES: Sequence[str] = (
+    "slide_id",
+    "slide",
+    "slide_stem",
+    "slide_name",
+    "resolved_path",
+    "pathology_id",
+    "case_id",
+)
+
+
 @dataclass
 class RegionAccumulator:
     """Accumulates embeddings and metadata per region."""
@@ -108,6 +119,38 @@ def _ensure_iterable(value: Optional[Iterable[int]]) -> Optional[List[int]]:
     return [int(v) for v in value]
 
 
+def _extract_slide_value(
+    csv_metadata: Mapping[str, object],
+    explicit_column: Optional[str],
+) -> Optional[str]:
+    """Resolve a slide identifier from the row metadata."""
+
+    csv_row = csv_metadata.get("csv_row")
+
+    def _pull(column: str) -> Optional[str]:
+        value: Optional[object] = None
+        if isinstance(csv_row, Mapping):
+            value = csv_row.get(column)
+        if value is None:
+            value = csv_metadata.get(column)
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    if explicit_column:
+        result = _pull(explicit_column)
+        if result:
+            return result
+
+    for candidate in DEFAULT_SLIDE_CANDIDATES:
+        result = _pull(candidate)
+        if result:
+            return result
+
+    return None
+
+
 def extract_biomed_embeddings(
     dataloader: DataLoader,
     model,
@@ -154,17 +197,7 @@ def extract_biomed_embeddings(
 
             csv_metadata = batch["metadata"][idx]
             csv_row = csv_metadata.get("csv_row")
-
-            slide_value: Optional[str] = None
-            if slide_column:
-                if isinstance(csv_row, Mapping):
-                    slide_value = csv_row.get(slide_column)  # type: ignore[index]
-                if slide_value is None:
-                    slide_value = csv_metadata.get(slide_column)
-                if slide_value is not None:
-                    slide_value = str(slide_value).strip()
-                    if not slide_value:
-                        slide_value = None
+            slide_value = _extract_slide_value(csv_metadata, slide_column)
 
             if slide_value:
                 region_key = f"{slide_value}::{base_region_id}"
