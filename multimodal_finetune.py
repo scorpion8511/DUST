@@ -1,10 +1,11 @@
-"""Train a simple classifier on PLIP, MUSK, CONCH, or PathGen embeddings.
+"""Train a simple classifier on PLIP, MUSK, CONCH, PathGen, or Biomed embeddings.
 
 This script reads an image/text CSV manifest with class labels, encodes each
-pair using either the PLIP or MUSK encoders, and then trains a linear classifier
-on the concatenated embeddings. It mirrors the CSV schema accepted by the
-feature extraction utilities (image paths, text prompts, optional filtering) so
-existing manifests can be reused for quick accuracy baselines.
+pair using PLIP, MUSK, CONCH, PathGen, or Biomed encoders, and then trains a
+linear classifier on the concatenated embeddings. It mirrors the CSV schema
+accepted by the feature extraction utilities (image paths, text prompts,
+optional filtering) so existing manifests can be reused for quick accuracy
+baselines.
 """
 
 from __future__ import annotations
@@ -351,6 +352,66 @@ class PathGenEncoder:
         return torch.cat(features, dim=0)
 
 
+class BiomedEncoder:
+    """Helper that wraps the BiomedCLIP checkpoint loaded via ``open_clip``."""
+
+    def __init__(
+        self,
+        model_id: str,
+        device: str,
+        precision: str,
+        context_length: int,
+        hf_token: Optional[str],
+    ) -> None:
+        _maybe_login(hf_token)
+
+        from PIL import Image  # noqa: F401  (ensure Pillow is available at runtime)
+        import open_clip
+
+        self.device = torch.device(device)
+        self.dtype = torch.float16 if precision == "fp16" else torch.float32
+
+        self.model, self.preprocess = open_clip.create_model_from_pretrained(model_id)
+        self.tokenizer = open_clip.get_tokenizer(model_id)
+        self.context_length = context_length
+
+        self.model.to(self.device, dtype=self.dtype).eval()
+
+    def encode(self, samples: Sequence[Sample], batch_size: int, normalize: bool) -> torch.Tensor:
+        from PIL import Image
+
+        features: List[torch.Tensor] = []
+        for start in range(0, len(samples), batch_size):
+            chunk = samples[start : start + batch_size]
+            images = [self.preprocess(Image.open(s.image_path).convert("RGB")) for s in chunk]
+            texts = [s.text for s in chunk]
+
+            image_tensor = torch.stack(images).to(self.device, dtype=self.dtype)
+            text_tokens = self.tokenizer(texts, context_length=self.context_length).to(self.device)
+
+            autocast_ctx = (
+                torch.cuda.amp.autocast(dtype=torch.float16)
+                if self.device.type == "cuda" and self.dtype == torch.float16
+                else nullcontext()
+            )
+
+            with torch.inference_mode():
+                with autocast_ctx:
+                    image_embeddings = self.model.encode_image(image_tensor)
+                    text_embeddings = self.model.encode_text(text_tokens)
+
+            if normalize:
+                image_embeddings = F.normalize(image_embeddings, dim=-1)
+                text_embeddings = F.normalize(text_embeddings, dim=-1)
+
+            combined = torch.cat(
+                [image_embeddings.float(), text_embeddings.float()], dim=-1
+            )
+            features.append(combined.cpu())
+
+        return torch.cat(features, dim=0)
+
+
 def resolve_tokenizer_path(musk_repo: Optional[str]) -> str:
     """Infer the MUSK tokenizer path from a local clone."""
 
@@ -392,6 +453,9 @@ def encode_features(
     pathgen_model: str,
     pathgen_pretrained: Optional[str],
     pathgen_precision: str,
+    biomed_model_id: str,
+    biomed_precision: str,
+    biomed_context_length: int,
 ) -> torch.Tensor:
     if model_name == "plip":
         return encode_with_plip(samples, "vinid/plip", batch_size, normalize, device)
@@ -427,6 +491,15 @@ def encode_features(
             pretrained=pathgen_pretrained or "",
             device=device,
             precision=pathgen_precision,
+            hf_token=hf_token,
+        )
+        return encoder.encode(samples, batch_size, normalize)
+    if model_name == "biomed":
+        encoder = BiomedEncoder(
+            model_id=biomed_model_id,
+            device=device,
+            precision=biomed_precision,
+            context_length=biomed_context_length,
             hf_token=hf_token,
         )
         return encoder.encode(samples, batch_size, normalize)
@@ -485,12 +558,12 @@ def evaluate(model: nn.Module, features: torch.Tensor, labels: torch.Tensor, dev
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Train a classifier using PLIP, MUSK, CONCH, or PathGen embeddings"
+        description="Train a classifier using PLIP, MUSK, CONCH, PathGen, or Biomed embeddings"
     )
     parser.add_argument("csv", type=str, help="Path to the image/text manifest")
     parser.add_argument(
         "--model",
-        choices=["plip", "musk", "conch", "pathgen"],
+        choices=["plip", "musk", "conch", "pathgen", "biomed"],
         required=True,
         help="Encoder to use",
     )
@@ -507,7 +580,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--no-normalize", action="store_true", help="Disable L2 normalisation for PLIP embeddings")
+    parser.add_argument("--no-normalize", action="store_true", help="Disable L2 normalisation of embeddings before classification")
     parser.add_argument("--musk-checkpoint", type=str, default="hf_hub:xiangjx/musk")
     parser.add_argument("--musk-precision", choices=["fp16", "fp32"], default="fp16")
     parser.add_argument("--text-tokenizer", type=str, default=None, help="SentencePiece tokenizer path for MUSK")
@@ -561,6 +634,24 @@ def main() -> None:
         default="fp16",
         help="Floating point precision for PathGen inference",
     )
+    parser.add_argument(
+        "--biomed-model-id",
+        type=str,
+        default="microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224",
+        help="Model identifier passed to open_clip.create_model_from_pretrained",
+    )
+    parser.add_argument(
+        "--biomed-precision",
+        choices=["fp16", "fp32"],
+        default="fp16",
+        help="Floating point precision for Biomed inference",
+    )
+    parser.add_argument(
+        "--biomed-context-length",
+        type=int,
+        default=256,
+        help="Maximum token length supplied to the Biomed tokenizer",
+    )
     args = parser.parse_args()
 
     samples, label_map = read_manifest(
@@ -595,6 +686,9 @@ def main() -> None:
         pathgen_model=args.pathgen_model,
         pathgen_pretrained=args.pathgen_pretrained,
         pathgen_precision=args.pathgen_precision,
+        biomed_model_id=args.biomed_model_id,
+        biomed_precision=args.biomed_precision,
+        biomed_context_length=args.biomed_context_length,
     )
     features_val = encode_features(
         model_name=args.model,
@@ -615,6 +709,9 @@ def main() -> None:
         pathgen_model=args.pathgen_model,
         pathgen_pretrained=args.pathgen_pretrained,
         pathgen_precision=args.pathgen_precision,
+        biomed_model_id=args.biomed_model_id,
+        biomed_precision=args.biomed_precision,
+        biomed_context_length=args.biomed_context_length,
     )
     features_test = encode_features(
         model_name=args.model,
@@ -635,6 +732,9 @@ def main() -> None:
         pathgen_model=args.pathgen_model,
         pathgen_pretrained=args.pathgen_pretrained,
         pathgen_precision=args.pathgen_precision,
+        biomed_model_id=args.biomed_model_id,
+        biomed_precision=args.biomed_precision,
+        biomed_context_length=args.biomed_context_length,
     )
 
     labels_train = torch.tensor([sample.label for sample in train_samples], dtype=torch.long)
