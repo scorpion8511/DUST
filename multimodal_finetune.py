@@ -86,6 +86,25 @@ def _extract_labels(payload: Mapping[str, object]) -> Optional[Sequence[object]]
     return None
 
 
+def _strip_magnification_suffixes(identifier: str) -> str:
+    parts = identifier.split("_")
+    if len(parts) <= 1:
+        return identifier
+
+    base_parts: List[str] = []
+    for part in parts:
+        token = part.strip().lower()
+        if token.endswith("x"):
+            magnitude = token[:-1]
+            if magnitude.replace(".", "", 1).isdigit():
+                continue
+        base_parts.append(part)
+
+    if not base_parts:
+        return identifier
+    return "_".join(base_parts)
+
+
 def _normalise_identifier_tokens(value: Optional[object]) -> List[str]:
     if value is None:
         return []
@@ -94,46 +113,47 @@ def _normalise_identifier_tokens(value: Optional[object]) -> List[str]:
     if not text:
         return []
 
-    candidates: List[str] = [text]
-
-    if isinstance(value, str):
-        normalised = os.path.normpath(value)
-    else:
-        normalised = os.path.normpath(text)
-    if normalised not in candidates:
-        candidates.append(normalised)
-
-    replaced = text.replace("\\", "/")
-    if replaced not in candidates:
-        candidates.append(replaced)
-
-    normalised_replaced = normalised.replace("\\", "/")
-    if normalised_replaced not in candidates:
-        candidates.append(normalised_replaced)
-
-    base_tokens: List[str] = []
-    for candidate in list(candidates):
-        if any(sep in candidate for sep in ("/", "\\")):
-            base = os.path.basename(candidate)
-            if base and base not in candidates and base not in base_tokens:
-                base_tokens.append(base)
-    candidates.extend(base_tokens)
-
-    lower_tokens: List[str] = []
-    for candidate in list(candidates):
-        lowered = candidate.lower()
-        if lowered not in candidates and lowered not in lower_tokens:
-            lower_tokens.append(lowered)
-    candidates.extend(lower_tokens)
-
     seen: Set[str] = set()
     tokens: List[str] = []
-    for candidate in candidates:
-        if not candidate:
+    queue: List[str] = [text]
+
+    while queue:
+        candidate = queue.pop(0)
+        if not candidate or candidate in seen:
             continue
-        if candidate not in seen:
-            seen.add(candidate)
-            tokens.append(candidate)
+
+        seen.add(candidate)
+        tokens.append(candidate)
+
+        normalised = os.path.normpath(candidate)
+        if normalised not in seen:
+            queue.append(normalised)
+
+        replaced = candidate.replace("\\", "/")
+        if replaced not in seen:
+            queue.append(replaced)
+
+        normalised_replaced = normalised.replace("\\", "/")
+        if normalised_replaced not in seen:
+            queue.append(normalised_replaced)
+
+        if any(sep in candidate for sep in ("/", "\\")):
+            base = os.path.basename(candidate)
+            if base and base not in seen:
+                queue.append(base)
+
+        root, ext = os.path.splitext(candidate)
+        if ext and root and root not in seen:
+            queue.append(root)
+
+        stripped = _strip_magnification_suffixes(root if ext and root else candidate)
+        if stripped and stripped not in seen:
+            queue.append(stripped)
+
+        lowered = candidate.lower()
+        if lowered not in seen:
+            queue.append(lowered)
+
     return tokens
 
 
