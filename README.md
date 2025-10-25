@@ -225,6 +225,30 @@ repository; the script performs `huggingface_hub.login` for you. Omit the flag
 after authenticating with `huggingface-cli login` or when loading local
 checkpoints.
 
+### BiomedCLIP feature extractor
+
+`biomed_feature_extraction.py` targets Microsoft's BiomedCLIP checkpoint via
+`open_clip.create_model_from_pretrained`. The script consumes the same CSV
+schema as the other multimodal helpers, applies the returned preprocessing
+transform to each patch, tokenises captions with the matching BiomedCLIP
+tokenizer (respecting the 256-token context window by default), and exports a
+`.pth` archive compatible with `multimodal_scoring.py`.
+
+```bash
+python biomed_feature_extraction.py manifest.csv biomed_features.pth \
+    --image-root /home/jovyan/work/tran_est/multires_VL/output \
+    --image-column patch_path --text-column generated_text \
+    --magnification-column patch_scale --region-column patch_id \
+    --strip-region-suffix --metadata-json biomed_metadata.json
+```
+
+L2 normalisation is enabled by default; add `--no-normalize` to keep the raw
+encoder outputs. The helper records region ids, deduplicated captions, optional
+slide identifiers, and any provided labels in the metadata block so downstream
+scoring routines have the same provenance guarantees as the PLIP/CONCH/MUSK
+pipelines. Authenticate with `--hf-token` when accessing gated checkpoints on
+the Hugging Face Hub (the script will call `huggingface_hub.login`).
+
 ### PathGen feature extractor
 
 `pathgen_feature_extraction.py` mirrors the same CSV schema for PathGen CLIP
