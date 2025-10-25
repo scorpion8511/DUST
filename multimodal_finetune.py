@@ -17,7 +17,7 @@ import random
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -31,12 +31,17 @@ class Sample:
     text: str
     label: int
     index: int
+    feature_index: Optional[int] = None
+    identifier: Optional[str] = None
+    csv_image: Optional[str] = None
 
 
 @dataclass
 class PrecomputedFeatureSet:
     features: torch.Tensor
     labels: Optional[Sequence[object]]
+    metadata: Optional[Mapping[str, object]]
+    row_indices: Optional[Sequence[int]]
 
 
 def _coerce_tensor(value: object) -> torch.Tensor:
@@ -81,14 +86,153 @@ def _extract_labels(payload: Mapping[str, object]) -> Optional[Sequence[object]]
     return None
 
 
+def _normalise_identifier_tokens(value: Optional[object]) -> List[str]:
+    if value is None:
+        return []
+
+    text = str(value)
+    if not text:
+        return []
+
+    candidates: List[str] = [text]
+
+    if isinstance(value, str):
+        normalised = os.path.normpath(value)
+    else:
+        normalised = os.path.normpath(text)
+    if normalised not in candidates:
+        candidates.append(normalised)
+
+    replaced = text.replace("\\", "/")
+    if replaced not in candidates:
+        candidates.append(replaced)
+
+    normalised_replaced = normalised.replace("\\", "/")
+    if normalised_replaced not in candidates:
+        candidates.append(normalised_replaced)
+
+    base_tokens: List[str] = []
+    for candidate in list(candidates):
+        if any(sep in candidate for sep in ("/", "\\")):
+            base = os.path.basename(candidate)
+            if base and base not in candidates and base not in base_tokens:
+                base_tokens.append(base)
+    candidates.extend(base_tokens)
+
+    lower_tokens: List[str] = []
+    for candidate in list(candidates):
+        lowered = candidate.lower()
+        if lowered not in candidates and lowered not in lower_tokens:
+            lower_tokens.append(lowered)
+    candidates.extend(lower_tokens)
+
+    seen: Set[str] = set()
+    tokens: List[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if candidate not in seen:
+            seen.add(candidate)
+            tokens.append(candidate)
+    return tokens
+
+
+def _build_sample_token_index(samples: Sequence[Sample]) -> Dict[str, List[int]]:
+    token_map: Dict[str, List[int]] = {}
+    for idx, sample in enumerate(samples):
+        sample_tokens: Set[str] = set()
+        for value in (sample.identifier, sample.csv_image, sample.image_path):
+            for token in _normalise_identifier_tokens(value):
+                sample_tokens.add(token)
+        for token in sample_tokens:
+            token_map.setdefault(token, []).append(idx)
+    return token_map
+
+
+def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedFeatureSet) -> None:
+    if features.features.shape[0] == len(samples):
+        return
+
+    assigned = {idx for idx, sample in enumerate(samples) if sample.feature_index is not None}
+
+    if features.row_indices and len(features.row_indices) == features.features.shape[0]:
+        for feature_idx, row_idx in enumerate(features.row_indices):
+            try:
+                row_int = int(row_idx)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= row_int < len(samples):
+                sample = samples[row_int]
+                if sample.feature_index is None:
+                    sample.feature_index = feature_idx
+                    assigned.add(row_int)
+        if len(assigned) == len(samples):
+            return
+
+    metadata = features.metadata or {}
+    if not isinstance(metadata, Mapping):
+        raise ValueError(
+            "Precomputed features contain fewer rows than the manifest and do not provide metadata for alignment."
+        )
+
+    csv_mapping = metadata.get("csv_region_mapping")
+    region_ids = metadata.get("region_ids")
+    if not isinstance(csv_mapping, Mapping) or not isinstance(region_ids, Sequence):
+        raise ValueError(
+            "Precomputed features contain fewer rows than the manifest and are missing 'csv_region_mapping' metadata."
+        )
+
+    token_index = _build_sample_token_index(samples)
+    unmatched_samples = {idx for idx in range(len(samples)) if samples[idx].feature_index is None}
+
+    for feature_idx, region_id in enumerate(region_ids):
+        if not unmatched_samples:
+            break
+        raw_ids = csv_mapping.get(region_id)
+        if raw_ids is None:
+            raw_ids = [region_id]
+        elif isinstance(raw_ids, str):
+            raw_ids = [raw_ids]
+        matched = False
+        for raw_id in raw_ids:
+            for token in _normalise_identifier_tokens(raw_id):
+                for sample_idx in token_index.get(token, []):
+                    if sample_idx not in unmatched_samples:
+                        continue
+                    samples[sample_idx].feature_index = feature_idx
+                    unmatched_samples.remove(sample_idx)
+                    matched = True
+        if matched:
+            continue
+
+    if unmatched_samples:
+        examples: List[str] = []
+        for sample_idx in sorted(unmatched_samples)[:5]:
+            sample = samples[sample_idx]
+            candidate = sample.identifier or sample.csv_image or os.path.basename(sample.image_path)
+            examples.append(str(candidate))
+        message = (
+            "Failed to align the manifest rows with the cached features. "
+            "Ensure --id-column matches the identifiers used during feature extraction or regenerate the cache."
+        )
+        if examples:
+            message += f" Example unmatched entries: {', '.join(examples)}."
+        raise ValueError(message)
+
+
 def load_precomputed_feature_set(path: str, normalize: bool) -> PrecomputedFeatureSet:
     payload = torch.load(path, map_location="cpu")
     features_tensor: Optional[torch.Tensor] = None
     labels: Optional[Sequence[object]] = None
+    metadata: Optional[Mapping[str, object]] = None
+    row_indices: Optional[Sequence[int]] = None
 
     if isinstance(payload, torch.Tensor):
         features_tensor = payload
     elif isinstance(payload, Mapping):
+        metadata_obj = payload.get("metadata")
+        if isinstance(metadata_obj, Mapping):
+            metadata = metadata_obj
         features_value: Optional[object] = None
         if "features" in payload:
             features_value = payload["features"]
@@ -113,6 +257,10 @@ def load_precomputed_feature_set(path: str, normalize: bool) -> PrecomputedFeatu
             features_tensor = _coerce_tensor(features_value).float()
 
         labels = _extract_labels(payload)
+
+        if "row_indices" in payload:
+            row_tensor = _coerce_tensor(payload["row_indices"]).long()
+            row_indices = row_tensor.tolist()
     else:
         raise TypeError("Unsupported precomputed feature format")
 
@@ -122,7 +270,12 @@ def load_precomputed_feature_set(path: str, normalize: bool) -> PrecomputedFeatu
     if normalize:
         features_tensor = F.normalize(features_tensor, dim=-1)
 
-    return PrecomputedFeatureSet(features=features_tensor, labels=labels)
+    return PrecomputedFeatureSet(
+        features=features_tensor,
+        labels=labels,
+        metadata=metadata,
+        row_indices=row_indices,
+    )
 
 
 def _maybe_login(token: Optional[str]) -> None:
@@ -145,6 +298,7 @@ def read_manifest(
     image_column: str,
     text_column: str,
     label_column: str,
+    id_column: Optional[str],
     filter_column: Optional[str],
     filter_values: Optional[Sequence[str]],
     *,
@@ -166,11 +320,14 @@ def read_manifest(
             raise ValueError("CSV must contain a class label column")
         if filter_column is not None and filter_column not in reader.fieldnames:
             raise ValueError(f"Unknown filter column: {filter_column}")
+        if id_column is not None and id_column not in reader.fieldnames:
+            raise ValueError(f"Unknown id column: {id_column}")
 
         for row in reader:
             if filter_column and filter_values and row.get(filter_column) not in filter_values:
                 continue
-            image_path = row[image_column]
+            image_value = row[image_column]
+            image_path = image_value
             if image_root:
                 image_path = os.path.join(image_root, image_path)
             if verify_images and not os.path.exists(image_path):
@@ -180,8 +337,18 @@ def read_manifest(
             if label_name not in label_to_index:
                 label_to_index[label_name] = len(label_to_index)
             label_idx = label_to_index[label_name]
+            identifier = row[id_column].strip() if id_column else None
+            if identifier == "":
+                identifier = None
             samples.append(
-                Sample(image_path=image_path, text=text, label=label_idx, index=len(samples))
+                Sample(
+                    image_path=image_path,
+                    text=text,
+                    label=label_idx,
+                    index=len(samples),
+                    identifier=identifier,
+                    csv_image=image_value,
+                )
             )
 
     index_to_label = {idx: name for name, idx in label_to_index.items()}
@@ -678,6 +845,14 @@ def main() -> None:
     parser.add_argument("--image-column", type=str, default="patch_path", help="CSV column containing image paths")
     parser.add_argument("--text-column", type=str, default="generated_text", help="CSV column containing text prompts")
     parser.add_argument("--label-column", type=str, default="label", help="CSV column containing class labels")
+    parser.add_argument(
+        "--id-column",
+        type=str,
+        default=None,
+        help=(
+            "Optional CSV column whose values align with identifiers stored in precomputed feature metadata."
+        ),
+    )
     parser.add_argument("--filter-column", type=str, default=None, help="Optional column used to filter rows")
     parser.add_argument("--filter-values", nargs="*", default=None, help="Values from --filter-column to keep")
     parser.add_argument("--batch-size", type=int, default=32)
@@ -767,6 +942,7 @@ def main() -> None:
         image_column=args.image_column,
         text_column=args.text_column,
         label_column=args.label_column,
+        id_column=args.id_column,
         filter_column=args.filter_column,
         filter_values=args.filter_values,
         verify_images=args.features is None,
@@ -780,15 +956,19 @@ def main() -> None:
         precomputed = load_precomputed_feature_set(
             args.features, normalize=not args.no_normalize
         )
+        if precomputed.labels is not None and len(precomputed.labels) != precomputed.features.shape[0]:
+            raise ValueError(
+                "Precomputed feature labels must align with the stored feature vectors"
+            )
+
         if precomputed.features.shape[0] != len(samples):
-            raise ValueError(
-                "Precomputed features do not match the number of rows in the manifest"
+            assign_precomputed_indices(samples, precomputed)
+            print(
+                "Using precomputed features from "
+                f"{args.features} (aligned {len(samples)} manifest rows to {precomputed.features.shape[0]} cached vectors)"
             )
-        if precomputed.labels is not None and len(precomputed.labels) != len(samples):
-            raise ValueError(
-                "Precomputed feature labels must align with the manifest order if provided"
-            )
-        print(f"Using precomputed features from {args.features}")
+        else:
+            print(f"Using precomputed features from {args.features}")
 
     encoder_kwargs = dict(
         model_name=args.model,
@@ -820,7 +1000,11 @@ def main() -> None:
                     (0, precomputed.features.shape[1]),
                     dtype=precomputed.features.dtype,
                 )
-            indices = torch.tensor([sample.index for sample in subset], dtype=torch.long)
+            resolved_indices: List[int] = []
+            for sample in subset:
+                index = sample.feature_index if sample.feature_index is not None else sample.index
+                resolved_indices.append(index)
+            indices = torch.tensor(resolved_indices, dtype=torch.long)
             return precomputed.features.index_select(0, indices)
         return encode_features(samples=subset, **encoder_kwargs)
 
