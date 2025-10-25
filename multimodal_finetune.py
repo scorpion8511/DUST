@@ -17,7 +17,7 @@ import random
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -30,6 +30,99 @@ class Sample:
     image_path: str
     text: str
     label: int
+    index: int
+
+
+@dataclass
+class PrecomputedFeatureSet:
+    features: torch.Tensor
+    labels: Optional[Sequence[object]]
+
+
+def _coerce_tensor(value: object) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    return torch.as_tensor(value)
+
+
+def _sorted_items(mapping: Mapping[object, object]) -> List[Tuple[object, object]]:
+    return sorted(mapping.items(), key=lambda item: str(item[0]))
+
+
+def _gather_image_embeddings(value: object) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value
+    if isinstance(value, Mapping):
+        tensors: List[torch.Tensor] = []
+        for _, tensor in _sorted_items(value):
+            tensors.append(_coerce_tensor(tensor))
+        if not tensors:
+            raise ValueError("image_embeddings mapping did not contain any tensors")
+        return torch.cat(tensors, dim=-1)
+    raise TypeError("Unsupported image_embeddings format in precomputed features")
+
+
+def _coerce_label_sequence(value: object) -> Sequence[object]:
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().tolist()
+    elif hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        value = value.tolist()
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return list(value)
+    return [value]
+
+
+def _extract_labels(payload: Mapping[str, object]) -> Optional[Sequence[object]]:
+    if "labels" in payload:
+        return _coerce_label_sequence(payload["labels"])
+    metadata = payload.get("metadata")
+    if isinstance(metadata, Mapping) and "labels" in metadata:
+        return _coerce_label_sequence(metadata["labels"])
+    return None
+
+
+def load_precomputed_feature_set(path: str, normalize: bool) -> PrecomputedFeatureSet:
+    payload = torch.load(path, map_location="cpu")
+    features_tensor: Optional[torch.Tensor] = None
+    labels: Optional[Sequence[object]] = None
+
+    if isinstance(payload, torch.Tensor):
+        features_tensor = payload
+    elif isinstance(payload, Mapping):
+        features_value: Optional[object] = None
+        if "features" in payload:
+            features_value = payload["features"]
+        elif "embeddings" in payload:
+            features_value = payload["embeddings"]
+        elif "image_embeddings" in payload and "text_embeddings" in payload:
+            image_embeddings = _gather_image_embeddings(payload["image_embeddings"])
+            text_embeddings = _coerce_tensor(payload["text_embeddings"])
+            if normalize:
+                image_embeddings = F.normalize(image_embeddings, dim=-1)
+                text_embeddings = F.normalize(text_embeddings, dim=-1)
+            features_tensor = torch.cat(
+                [image_embeddings.float(), text_embeddings.float()], dim=-1
+            )
+            normalize = False
+        else:
+            raise ValueError(
+                "Precomputed feature file must contain 'features', 'embeddings', or both 'image_embeddings' and 'text_embeddings'."
+            )
+
+        if features_tensor is None and features_value is not None:
+            features_tensor = _coerce_tensor(features_value).float()
+
+        labels = _extract_labels(payload)
+    else:
+        raise TypeError("Unsupported precomputed feature format")
+
+    if features_tensor is None:
+        raise ValueError("Failed to materialise feature tensor from precomputed file")
+
+    if normalize:
+        features_tensor = F.normalize(features_tensor, dim=-1)
+
+    return PrecomputedFeatureSet(features=features_tensor, labels=labels)
 
 
 def _maybe_login(token: Optional[str]) -> None:
@@ -54,8 +147,14 @@ def read_manifest(
     label_column: str,
     filter_column: Optional[str],
     filter_values: Optional[Sequence[str]],
+    *,
+    verify_images: bool = True,
 ) -> Tuple[List[Sample], Dict[int, str]]:
-    """Parse the manifest CSV and return typed samples plus the label map."""
+    """Parse the manifest CSV and return typed samples plus the label map.
+
+    When ``verify_images`` is ``False`` the image paths are not validated on disk,
+    which is useful when operating purely on precomputed features.
+    """
 
     samples: List[Sample] = []
     label_to_index: Dict[str, int] = {}
@@ -74,14 +173,16 @@ def read_manifest(
             image_path = row[image_column]
             if image_root:
                 image_path = os.path.join(image_root, image_path)
-            if not os.path.exists(image_path):
+            if verify_images and not os.path.exists(image_path):
                 raise FileNotFoundError(f"Missing image: {image_path}")
             text = row[text_column]
             label_name = row[label_column]
             if label_name not in label_to_index:
                 label_to_index[label_name] = len(label_to_index)
             label_idx = label_to_index[label_name]
-            samples.append(Sample(image_path=image_path, text=text, label=label_idx))
+            samples.append(
+                Sample(image_path=image_path, text=text, label=label_idx, index=len(samples))
+            )
 
     index_to_label = {idx: name for name, idx in label_to_index.items()}
     if not samples:
@@ -567,6 +668,12 @@ def main() -> None:
         required=True,
         help="Encoder to use",
     )
+    parser.add_argument(
+        "--features",
+        type=str,
+        default=None,
+        help="Path to a .pth file with precomputed features aligned to the manifest order.",
+    )
     parser.add_argument("--image-root", type=str, default=None, help="Optional root directory for image paths")
     parser.add_argument("--image-column", type=str, default="patch_path", help="CSV column containing image paths")
     parser.add_argument("--text-column", type=str, default="generated_text", help="CSV column containing text prompts")
@@ -662,14 +769,29 @@ def main() -> None:
         label_column=args.label_column,
         filter_column=args.filter_column,
         filter_values=args.filter_values,
+        verify_images=args.features is None,
     )
     train_samples, val_samples, test_samples = split_samples(
         samples, args.train_ratio, args.val_ratio, args.seed
     )
 
-    features_train = encode_features(
+    precomputed: Optional[PrecomputedFeatureSet] = None
+    if args.features:
+        precomputed = load_precomputed_feature_set(
+            args.features, normalize=not args.no_normalize
+        )
+        if precomputed.features.shape[0] != len(samples):
+            raise ValueError(
+                "Precomputed features do not match the number of rows in the manifest"
+            )
+        if precomputed.labels is not None and len(precomputed.labels) != len(samples):
+            raise ValueError(
+                "Precomputed feature labels must align with the manifest order if provided"
+            )
+        print(f"Using precomputed features from {args.features}")
+
+    encoder_kwargs = dict(
         model_name=args.model,
-        samples=train_samples,
         batch_size=args.batch_size,
         device=args.device,
         normalize=not args.no_normalize,
@@ -690,52 +812,21 @@ def main() -> None:
         biomed_precision=args.biomed_precision,
         biomed_context_length=args.biomed_context_length,
     )
-    features_val = encode_features(
-        model_name=args.model,
-        samples=val_samples,
-        batch_size=args.batch_size,
-        device=args.device,
-        normalize=not args.no_normalize,
-        musk_checkpoint=args.musk_checkpoint,
-        musk_precision=args.musk_precision,
-        tokenizer_path=args.text_tokenizer,
-        hf_token=args.hf_token,
-        musk_repo=args.musk_repo,
-        text_max_length=args.text_max_length,
-        conch_checkpoint=args.conch_checkpoint,
-        conch_model_cfg=args.conch_model_cfg,
-        conch_precision=args.conch_precision,
-        conch_force_img_size=args.conch_force_img_size,
-        pathgen_model=args.pathgen_model,
-        pathgen_pretrained=args.pathgen_pretrained,
-        pathgen_precision=args.pathgen_precision,
-        biomed_model_id=args.biomed_model_id,
-        biomed_precision=args.biomed_precision,
-        biomed_context_length=args.biomed_context_length,
-    )
-    features_test = encode_features(
-        model_name=args.model,
-        samples=test_samples,
-        batch_size=args.batch_size,
-        device=args.device,
-        normalize=not args.no_normalize,
-        musk_checkpoint=args.musk_checkpoint,
-        musk_precision=args.musk_precision,
-        tokenizer_path=args.text_tokenizer,
-        hf_token=args.hf_token,
-        musk_repo=args.musk_repo,
-        text_max_length=args.text_max_length,
-        conch_checkpoint=args.conch_checkpoint,
-        conch_model_cfg=args.conch_model_cfg,
-        conch_precision=args.conch_precision,
-        conch_force_img_size=args.conch_force_img_size,
-        pathgen_model=args.pathgen_model,
-        pathgen_pretrained=args.pathgen_pretrained,
-        pathgen_precision=args.pathgen_precision,
-        biomed_model_id=args.biomed_model_id,
-        biomed_precision=args.biomed_precision,
-        biomed_context_length=args.biomed_context_length,
-    )
+
+    def build_features(subset: Sequence[Sample]) -> torch.Tensor:
+        if precomputed is not None:
+            if not subset:
+                return torch.empty(
+                    (0, precomputed.features.shape[1]),
+                    dtype=precomputed.features.dtype,
+                )
+            indices = torch.tensor([sample.index for sample in subset], dtype=torch.long)
+            return precomputed.features.index_select(0, indices)
+        return encode_features(samples=subset, **encoder_kwargs)
+
+    features_train = build_features(train_samples)
+    features_val = build_features(val_samples)
+    features_test = build_features(test_samples)
 
     labels_train = torch.tensor([sample.label for sample in train_samples], dtype=torch.long)
     labels_val = torch.tensor([sample.label for sample in val_samples], dtype=torch.long)
