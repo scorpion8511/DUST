@@ -682,70 +682,70 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
             print(
                 f"\n=== Evaluating {model_name} ({dataset_name}): {feature_path} ==="
             )
-        (
-            image_embeddings,
-            text_embeddings,
-            metadata,
-            stored_magnifications,
-        ) = load_multimodal_embeddings(feature_path, device)
+            (
+                image_embeddings,
+                text_embeddings,
+                metadata,
+                stored_magnifications,
+            ) = load_multimodal_embeddings(feature_path, device)
 
-        _validate_alignment(metadata, image_embeddings, text_embeddings)
+            _validate_alignment(metadata, image_embeddings, text_embeddings)
 
-        if args.magnifications:
-            magnifications = list(args.magnifications)
-        elif stored_magnifications:
-            magnifications = [mag for mag in stored_magnifications if mag in image_embeddings]
-            if not magnifications:
+            if args.magnifications:
+                magnifications = list(args.magnifications)
+            elif stored_magnifications:
+                magnifications = [mag for mag in stored_magnifications if mag in image_embeddings]
+                if not magnifications:
+                    magnifications = list(sorted(image_embeddings.keys()))
+            else:
                 magnifications = list(sorted(image_embeddings.keys()))
-        else:
-            magnifications = list(sorted(image_embeddings.keys()))
 
-        msci_result = compute_msci(image_embeddings, text_embeddings, magnifications)
-        cmi_results = compute_cmi_lb_across_magnifications(
-            image_embeddings,
-            text_embeddings,
-            magnifications,
-            args.temperature,
-            min_temperature=args.min_temperature,
-            max_temperature=args.max_temperature,
-            temperature_steps=args.temperature_steps,
-        )
-
-        cmi_avg = float(sum(r.cmi_lb for r in cmi_results.values()) / len(cmi_results))
-
-        collected_scores.setdefault(dataset_name, {})[model_name] = {
-            "msci": float(msci_result.msci),
-            "cmi_lb_mean": cmi_avg,
-            "cmi_lb_per_mag": {
-                mag: float(cmi_results[mag].cmi_lb) for mag in magnifications
-            },
-        }
-
-        print("--- MSCI ---")
-        print(f"MSCI score: {msci_result.msci:.6f} (normalised by max variance {msci_result.max_variance:.6f})")
-        print(f"Mean variance: {msci_result.mean_variance:.6f}")
-        print("Per-region variance (first 10 values):")
-        preview = msci_result.per_region_variance[:10].cpu().numpy()
-        print(preview)
-
-        print("\n--- CMI-LB ---")
-        for mag in magnifications:
-            result = cmi_results[mag]
-            print(
-                f"Magnification {mag}x -> CMI-LB: {result.cmi_lb:.6f} (Lx={result.loss_x:.6f}, Ly={result.loss_y:.6f})"
+            msci_result = compute_msci(image_embeddings, text_embeddings, magnifications)
+            cmi_results = compute_cmi_lb_across_magnifications(
+                image_embeddings,
+                text_embeddings,
+                magnifications,
+                args.temperature,
+                min_temperature=args.min_temperature,
+                max_temperature=args.max_temperature,
+                temperature_steps=args.temperature_steps,
             )
-        print(f"Average CMI-LB across magnifications: {cmi_avg:.6f}")
 
-        aggregated_results.setdefault(dataset_name, {})[feature_path] = {
-            "msci": msci_result,
-            "cmi_lb": cmi_results,
-            "cmi_lb_mean": cmi_avg,
-        }
+            cmi_avg = float(sum(r.cmi_lb for r in cmi_results.values()) / len(cmi_results))
 
-        if args.json:
-            json_payload.setdefault(dataset_name, {})[feature_path] = _summarise_for_json(
-                msci_result, cmi_results, cmi_avg
-            )
+            collected_scores.setdefault(dataset_name, {})[model_name] = {
+                "msci": float(msci_result.msci),
+                "cmi_lb_mean": cmi_avg,
+                "cmi_lb_per_mag": {
+                    mag: float(cmi_results[mag].cmi_lb) for mag in magnifications
+                },
+            }
+
+            print("--- MSCI ---")
+            print(f"MSCI score: {msci_result.msci:.6f} (normalised by max variance {msci_result.max_variance:.6f})")
+            print(f"Mean variance: {msci_result.mean_variance:.6f}")
+            print("Per-region variance (first 10 values):")
+            preview = msci_result.per_region_variance[:10].cpu().numpy()
+            print(preview)
+
+            print("\n--- CMI-LB ---")
+            for mag in magnifications:
+                result = cmi_results[mag]
+                print(
+                    f"Magnification {mag}x -> CMI-LB: {result.cmi_lb:.6f} (Lx={result.loss_x:.6f}, Ly={result.loss_y:.6f})"
+                )
+            print(f"Average CMI-LB across magnifications: {cmi_avg:.6f}")
+
+            aggregated_results.setdefault(dataset_name, {})[feature_path] = {
+                "msci": msci_result,
+                "cmi_lb": cmi_results,
+                "cmi_lb_mean": cmi_avg,
+            }
+
+            if args.json:
+                json_payload.setdefault(dataset_name, {})[feature_path] = _summarise_for_json(
+                    msci_result, cmi_results, cmi_avg
+                )
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
