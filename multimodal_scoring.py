@@ -516,12 +516,12 @@ def _normalise_dataset_argument(
 
 def _optimise_combined_scores(
     collected_scores: Dict[str, Dict[str, float]],
-    ground_truth: Mapping[str, float],
+    dataset_truths: Mapping[str, Mapping[str, float]],
     search_space: Sequence[float],
-) -> Optional[Tuple[Tuple[float, float], float, Dict[str, float]]]:
+) -> Optional[Tuple[Tuple[float, float], Dict[str, float], Dict[str, float]]]:
     """Search for the best linear combination of MSCI and CMI-LB metrics."""
 
-    if not collected_scores:
+    if not collected_scores or not dataset_truths:
         return None
 
     model_names = list(collected_scores.keys())
@@ -533,31 +533,54 @@ def _optimise_combined_scores(
     msci_norm = (msci_values - msci_values.mean()) / (msci_std if msci_std else 1.0)
     cmi_norm = (cmi_values - cmi_values.mean()) / (cmi_std if cmi_std else 1.0)
 
-    overlap = [name for name in model_names if name in ground_truth]
-    if len(overlap) < 2:
+    dataset_overlaps: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    for dataset, truth_map in dataset_truths.items():
+        overlap = [name for name in model_names if name in truth_map]
+        if len(overlap) < 2:
+            continue
+        indices = np.array([model_names.index(name) for name in overlap], dtype=int)
+        truth = np.array([truth_map[name] for name in overlap], dtype=float)
+        dataset_overlaps[dataset] = (indices, truth)
+
+    if not dataset_overlaps:
         return None
 
-    overlap_idx = np.array([model_names.index(name) for name in overlap], dtype=int)
-    msci_overlap = msci_norm[overlap_idx]
-    cmi_overlap = cmi_norm[overlap_idx]
-    truth = np.array([ground_truth[name] for name in overlap], dtype=float)
-
-    best_tau = float("-inf")
+    best_objective = float("-inf")
     best_weights: Tuple[float, float] = (0.0, 0.0)
+    best_dataset_taus: Dict[str, float] = {}
 
     for w_msci in search_space:
         for w_cmi in search_space:
             if abs(w_msci) < 1e-12 and abs(w_cmi) < 1e-12:
                 continue
-            combined = w_msci * msci_overlap + w_cmi * cmi_overlap
-            tau, _ = weightedtau(combined, truth)
-            if math.isnan(tau):
-                continue
-            if tau > best_tau:
-                best_tau = float(tau)
-                best_weights = (float(w_msci), float(w_cmi))
 
-    if best_tau == float("-inf"):
+            combined = w_msci * msci_norm + w_cmi * cmi_norm
+            aggregate = 0.0
+            total_weight = 0.0
+            per_dataset_tau: Dict[str, float] = {}
+
+            for dataset, (indices, truth) in dataset_overlaps.items():
+                tau, _ = weightedtau(combined[indices], truth)
+                if math.isnan(tau):
+                    continue
+                per_dataset_tau[dataset] = float(tau)
+                weight = float(len(truth))
+                aggregate += weight * float(tau)
+                total_weight += weight
+
+            if not per_dataset_tau:
+                continue
+
+            objective = aggregate / total_weight if total_weight else float(
+                np.mean(list(per_dataset_tau.values()))
+            )
+
+            if objective > best_objective:
+                best_objective = objective
+                best_weights = (float(w_msci), float(w_cmi))
+                best_dataset_taus = per_dataset_tau
+
+    if best_objective == float("-inf"):
         return None
 
     combined_all = best_weights[0] * msci_norm + best_weights[1] * cmi_norm
@@ -565,7 +588,7 @@ def _optimise_combined_scores(
         model: float(score) for model, score in zip(model_names, combined_all)
     }
 
-    return best_weights, best_tau, combined_scores
+    return best_weights, best_dataset_taus, combined_scores
 
 
 def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
@@ -678,7 +701,39 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     ground_truth = _load_ground_truth(args.ground_truth)
     search_space = np.linspace(args.weight_min, args.weight_max, args.weight_steps)
 
+    joint_optimisation = None
+    combined_label = "combined"
+
     if collected_scores:
+        dataset_truths = {
+            dataset: gt
+            for dataset in requested_datasets
+            if (gt := ground_truth.get(dataset))
+            if isinstance(gt, Mapping) and gt
+        }
+
+        joint_optimisation = _optimise_combined_scores(
+            collected_scores,
+            dataset_truths,
+            search_space,
+        )
+
+        if joint_optimisation is not None:
+            (weights, _, combined_scores) = joint_optimisation
+            descriptor = (
+                "Optimal global combined weights"
+                if multi_dataset
+                else "Optimal combined weights"
+            )
+            print(
+                f"{descriptor} (w_msci={weights[0]:.3f}, w_cmi={weights[1]:.3f})"
+            )
+            print("Combined weighted scores:")
+            combined_label = "combined_global" if multi_dataset else "combined"
+            for name, value in combined_scores.items():
+                collected_scores.setdefault(name, {})[combined_label] = value
+                print(f"  {name}: {value:.6f}")
+
         for dataset in requested_datasets:
             gt = ground_truth.get(dataset)
             if not gt:
@@ -704,23 +759,22 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                     f"Kendall tau_w (CMI-LB mean vs ground truth) for {dataset}: {cmi_tau:.6f}"
                 )
 
-            optimisation = _optimise_combined_scores(
-                collected_scores,
-                gt,
-                search_space,
-            )
-            if optimisation is not None:
-                (w_msci, w_cmi), combined_tau, combined_scores = optimisation
-                print(
-                    "Optimal combined weights (w_msci={:.3f}, w_cmi={:.3f}) -> Kendall tau_w={:.6f}".format(
-                        w_msci, w_cmi, combined_tau
+            if joint_optimisation is not None:
+                weights, dataset_taus, _ = joint_optimisation
+                tau_value = dataset_taus.get(dataset)
+                if tau_value is not None:
+                    descriptor = (
+                        "global combined weights"
+                        if multi_dataset
+                        else "combined weights"
                     )
-                )
-                print("Combined weighted scores:")
-                for name, value in combined_scores.items():
-                    combined_key = "combined" if not multi_dataset else f"combined_{dataset}"
-                    collected_scores[name][combined_key] = value
-                    print(f"  {name}: {value:.6f}")
+                    print(
+                        f"Kendall tau_w ({descriptor} vs ground truth) for {dataset}: {tau_value:.6f}"
+                    )
+                else:
+                    print(
+                        "Unable to derive combined MSCI/CMI-LB weights for benchmarking; insufficient ground-truth overlap."
+                    )
             else:
                 print(
                     "Unable to derive combined MSCI/CMI-LB weights for benchmarking; insufficient ground-truth overlap."
