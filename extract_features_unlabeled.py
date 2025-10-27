@@ -8,11 +8,11 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 from tqdm.auto import tqdm
+
 
 MODEL_ZOO: Mapping[str, Tuple[object, str]] = {
     "uni": (
@@ -41,25 +41,21 @@ MODEL_ZOO: Mapping[str, Tuple[object, str]] = {
 @dataclass
 class PatchSample:
     image_path: str
-    label_idx: int
-    label_name: str
     region_id: str
     magnification: str
     row_index: int
 
 
 class MultiScalePatchDataset(Dataset):
-    """Dataset that loads multi-scale patches from a manifest."""
+    """Dataset that loads multi-scale patches without labels."""
 
     def __init__(
         self,
         samples: Sequence[PatchSample],
         transform: transforms.Compose,
-        include_metadata: bool = True,
     ) -> None:
         self.samples = list(samples)
         self.transform = transform
-        self.include_metadata = include_metadata
 
     def __len__(self) -> int:  # noqa: D401 - simple forwarding
         return len(self.samples)
@@ -68,13 +64,13 @@ class MultiScalePatchDataset(Dataset):
         sample = self.samples[index]
         image = Image.open(sample.image_path).convert("RGB")
         image = self.transform(image)
-        label = torch.tensor(sample.label_idx, dtype=torch.long)
-        if not self.include_metadata:
-            return image, label
-        region = sample.region_id
-        magnification = sample.magnification
-        row_index = torch.tensor(sample.row_index, dtype=torch.long)
-        return image, label, region, magnification, sample.image_path, row_index
+        metadata = (
+            sample.region_id,
+            sample.magnification,
+            sample.image_path,
+            sample.row_index,
+        )
+        return image, *metadata
 
 
 def _validate_columns(df: pd.DataFrame, columns: Iterable[str]) -> None:
@@ -88,17 +84,13 @@ def load_manifest(
     *,
     image_root: Optional[str],
     image_column: str,
-    label_column: str,
     region_column: str,
     magnification_column: str,
     filter_column: Optional[str],
     filter_values: Optional[Sequence[str]],
 ) -> pd.DataFrame:
     df = pd.read_csv(manifest_path)
-    _validate_columns(
-        df,
-        [image_column, label_column, region_column, magnification_column],
-    )
+    _validate_columns(df, [image_column, region_column, magnification_column])
     if filter_column:
         if filter_column not in df.columns:
             raise ValueError(f"Unknown filter column: {filter_column}")
@@ -119,14 +111,6 @@ def load_manifest(
         )
 
     return df.reset_index(drop=False).rename(columns={"index": "__row_index"})
-
-
-def build_label_map(df: pd.DataFrame, label_column: str) -> Dict[str, int]:
-    mapping: Dict[str, int] = {}
-    for label in df[label_column].astype(str):
-        if label not in mapping:
-            mapping[label] = len(mapping)
-    return mapping
 
 
 def select_split(
@@ -240,19 +224,14 @@ def samples_from_dataframe(
     df: pd.DataFrame,
     *,
     image_column: str,
-    label_column: str,
     region_column: str,
     magnification_column: str,
-    label_map: Mapping[str, int],
 ) -> List[PatchSample]:
     samples: List[PatchSample] = []
     for _, row in df.iterrows():
-        label_name = str(row[label_column])
         samples.append(
             PatchSample(
                 image_path=str(row[image_column]),
-                label_idx=label_map[label_name],
-                label_name=label_name,
                 region_id=str(row[region_column]),
                 magnification=str(row[magnification_column]),
                 row_index=int(row["__row_index"]),
@@ -317,9 +296,8 @@ def extract_embeddings(
     device: torch.device,
     *,
     normalize: bool,
-) -> Dict[str, torch.Tensor | List[str] | List[int]]:
+) -> Dict[str, object]:
     embeddings: List[torch.Tensor] = []
-    labels: List[torch.Tensor] = []
     region_ids: List[str] = []
     magnifications: List[str] = []
     paths: List[str] = []
@@ -327,14 +305,13 @@ def extract_embeddings(
 
     with torch.inference_mode():
         for batch in tqdm(loader, desc="extract", leave=False):
-            images, target = batch[0], batch[1]
-            metadata = batch[2:] if len(batch) > 2 else None
+            images = batch[0]
+            metadata = batch[1:]
             images = images.to(device)
             outputs = _extract_batch_features(model, images)
             if normalize:
-                outputs = F.normalize(outputs, dim=-1)
+                outputs = torch.nn.functional.normalize(outputs, dim=-1)
             embeddings.append(outputs.cpu())
-            labels.append(target.detach().cpu())
             if metadata:
                 regions, mags, img_paths, rows = metadata
                 region_ids.extend(list(regions))
@@ -342,9 +319,8 @@ def extract_embeddings(
                 paths.extend(list(img_paths))
                 row_indices.extend([int(r) for r in rows])
 
-    features = {
+    features: Dict[str, object] = {
         "embeddings": torch.cat(embeddings, dim=0) if embeddings else torch.empty(0),
-        "labels": torch.cat(labels, dim=0) if labels else torch.empty(0, dtype=torch.long),
     }
     if region_ids:
         features.update(
@@ -412,17 +388,11 @@ def main(args: argparse.Namespace) -> None:
         args.manifest,
         image_root=args.image_root,
         image_column=args.image_column,
-        label_column=args.label_column,
         region_column=args.region_column,
         magnification_column=args.magnification_column,
         filter_column=args.filter_column,
         filter_values=args.filter_values,
     )
-
-    label_map = build_label_map(df, args.label_column)
-    label_names = ["" for _ in range(len(label_map))]
-    for name, idx in label_map.items():
-        label_names[idx] = name
 
     split_specs: Dict[str, List[str]] = {}
     if args.train_splits:
@@ -450,14 +420,18 @@ def main(args: argparse.Namespace) -> None:
         )
         proportions = df.attrs.pop("split_proportions", None)
         if proportions:
-            summary = ", ".join(f"{name}: {fraction:.3f}" for name, fraction in proportions.items())
+            summary = ", ".join(
+                f"{name}: {fraction:.3f}" for name, fraction in proportions.items()
+            )
             print(f"Random split proportions -> {summary}")
 
     subsets: Dict[str, pd.DataFrame] = {}
     for split_name, values in split_specs.items():
         subset = select_split(df, args.split_column, values)
         if subset.empty:
-            print(f"Warning: split '{split_name}' with values {values} produced no rows; skipping")
+            print(
+                f"Warning: split '{split_name}' with values {values} produced no rows; skipping"
+            )
             continue
         subsets[split_name] = subset
         manifest_out = os.path.join(args.out_dir, f"{split_name}_manifest.csv")
@@ -480,12 +454,10 @@ def main(args: argparse.Namespace) -> None:
             samples = samples_from_dataframe(
                 subset,
                 image_column=args.image_column,
-                label_column=args.label_column,
                 region_column=args.region_column,
                 magnification_column=args.magnification_column,
-                label_map=label_map,
             )
-            dataset = MultiScalePatchDataset(samples, transform, include_metadata=True)
+            dataset = MultiScalePatchDataset(samples, transform)
             loader = DataLoader(
                 dataset,
                 batch_size=args.batch_size,
@@ -501,13 +473,10 @@ def main(args: argparse.Namespace) -> None:
             )
             features.update(
                 {
-                    "label_names": label_names,
-                    "label_mapping": dict(label_map),
                     "split_name": split_name,
                     "split_values": split_specs[split_name],
                     "manifest_path": os.path.abspath(args.manifest),
                     "image_column": args.image_column,
-                    "label_column": args.label_column,
                     "region_column": args.region_column,
                     "magnification_column": args.magnification_column,
                     "split_column": args.split_column,
@@ -529,27 +498,85 @@ def main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extract pretrained embeddings from multi-scale patches")
+    parser = argparse.ArgumentParser(
+        description="Extract pretrained embeddings without storing label metadata"
+    )
     parser.add_argument("manifest", type=str, help="CSV manifest containing patch metadata")
     parser.add_argument("out_dir", type=str, help="Directory to store extracted features")
     parser.add_argument("--models", nargs="*", default=list(MODEL_ZOO.keys()), help="Models to process")
-    parser.add_argument("--image-root", type=str, default=None, help="Optional root to prepend to image paths")
-    parser.add_argument("--image-column", type=str, default="patch_path", help="CSV column with image paths")
-    parser.add_argument("--label-column", type=str, default="subtype", help="CSV column with class labels")
-    parser.add_argument("--region-column", type=str, default="patch_id", help="CSV column with region identifiers")
-    parser.add_argument("--magnification-column", type=str, default="patch_scale", help="CSV column with magnification levels")
-    parser.add_argument("--split-column", type=str, default="split", help="Column that defines dataset splits (train/val/test)")
-    parser.add_argument("--train-splits", nargs="*", default=["train"], help="Values that identify training rows in the split column")
-    parser.add_argument("--eval-splits", nargs="*", default=["val"], help="Values that identify evaluation rows in the split column")
-    parser.add_argument("--extra-split", action="append", default=[], help="Additional split specification of the form name=value1,value2")
-    parser.add_argument("--split-ratio", action="append", default=[], help="Optional ratio specification for random splits when the split column is missing (value=fraction)")
-    parser.add_argument("--filter-column", type=str, default=None, help="Optional column used to filter rows before processing")
-    parser.add_argument("--filter-values", nargs="*", default=None, help="Allowed values for the filter column")
-    parser.add_argument("--device", type=str, default="cpu", help="Device to run inference on (cpu or cuda:0)")
+    parser.add_argument(
+        "--image-root", type=str, default=None, help="Optional root to prepend to image paths"
+    )
+    parser.add_argument(
+        "--image-column", type=str, default="patch_path", help="CSV column with image paths"
+    )
+    parser.add_argument(
+        "--region-column", type=str, default="patch_id", help="CSV column with region identifiers"
+    )
+    parser.add_argument(
+        "--magnification-column",
+        type=str,
+        default="patch_scale",
+        help="CSV column with magnification levels",
+    )
+    parser.add_argument(
+        "--split-column",
+        type=str,
+        default="split",
+        help="Column that defines dataset splits (train/val/test)",
+    )
+    parser.add_argument(
+        "--train-splits",
+        nargs="*",
+        default=["train"],
+        help="Values that identify training rows in the split column",
+    )
+    parser.add_argument(
+        "--eval-splits",
+        nargs="*",
+        default=["val"],
+        help="Values that identify evaluation rows in the split column",
+    )
+    parser.add_argument(
+        "--extra-split",
+        action="append",
+        default=[],
+        help="Additional split specification of the form name=value1,value2",
+    )
+    parser.add_argument(
+        "--split-ratio",
+        action="append",
+        default=[],
+        help="Optional ratio specification for random splits when the split column is missing (value=fraction)",
+    )
+    parser.add_argument(
+        "--filter-column",
+        type=str,
+        default=None,
+        help="Optional column used to filter rows before processing",
+    )
+    parser.add_argument(
+        "--filter-values",
+        nargs="*",
+        default=None,
+        help="Allowed values for the filter column",
+    )
+    parser.add_argument(
+        "--device", type=str, default="cpu", help="Device to run inference on (cpu or cuda:0)"
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--image-size", type=int, default=224, help="Image resize dimension")
-    parser.add_argument("--normalize", action="store_true", help="Apply L2 normalisation to embeddings")
-    parser.add_argument("--random-seed", type=int, default=42, help="Random seed used when generating missing split assignments")
+    parser.add_argument(
+        "--image-size", type=int, default=224, help="Image resize dimension"
+    )
+    parser.add_argument(
+        "--normalize", action="store_true", help="Apply L2 normalisation to embeddings"
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=42,
+        help="Random seed used when generating missing split assignments",
+    )
     args = parser.parse_args()
     main(args)
