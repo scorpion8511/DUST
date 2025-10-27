@@ -515,34 +515,56 @@ def _normalise_dataset_argument(
 
 
 def _optimise_combined_scores(
-    collected_scores: Dict[str, Dict[str, float]],
+    per_dataset_scores: Mapping[str, Mapping[str, Mapping[str, float]]],
     dataset_truths: Mapping[str, Mapping[str, float]],
     search_space: Sequence[float],
-) -> Optional[Tuple[Tuple[float, float], Dict[str, float], Dict[str, float]]]:
+) -> Optional[
+    Tuple[Tuple[float, float], Dict[str, float], Dict[str, Dict[str, float]]]
+]:
     """Search for shared MSCI/CMI-LB weights across multiple datasets."""
 
-    if not collected_scores or not dataset_truths:
+    if not per_dataset_scores or not dataset_truths:
         return None
 
-    model_names = list(collected_scores.keys())
-    msci_values = np.array([collected_scores[name]["msci"] for name in model_names], dtype=float)
-    cmi_values = np.array([collected_scores[name]["cmi_lb_mean"] for name in model_names], dtype=float)
+    prepared: Dict[str, Dict[str, object]] = {}
 
-    msci_std = msci_values.std()
-    cmi_std = cmi_values.std()
-    msci_norm = (msci_values - msci_values.mean()) / (msci_std if msci_std else 1.0)
-    cmi_norm = (cmi_values - cmi_values.mean()) / (cmi_std if cmi_std else 1.0)
-
-    dataset_overlaps: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
     for dataset, truth_map in dataset_truths.items():
+        scores = per_dataset_scores.get(dataset)
+        if not scores:
+            continue
+
+        model_names = list(scores.keys())
+        if len(model_names) < 2:
+            continue
+
+        msci_values = np.array(
+            [scores[name]["msci"] for name in model_names], dtype=float
+        )
+        cmi_values = np.array(
+            [scores[name]["cmi_lb_mean"] for name in model_names], dtype=float
+        )
+
+        msci_std = msci_values.std()
+        cmi_std = cmi_values.std()
+        msci_norm = (msci_values - msci_values.mean()) / (msci_std if msci_std else 1.0)
+        cmi_norm = (cmi_values - cmi_values.mean()) / (cmi_std if cmi_std else 1.0)
+
         overlap = [name for name in model_names if name in truth_map]
         if len(overlap) < 2:
             continue
+
         indices = np.array([model_names.index(name) for name in overlap], dtype=int)
         truth = np.array([truth_map[name] for name in overlap], dtype=float)
-        dataset_overlaps[dataset] = (indices, truth)
 
-    if not dataset_overlaps:
+        prepared[dataset] = {
+            "msci_norm": msci_norm,
+            "cmi_norm": cmi_norm,
+            "indices": indices,
+            "truth": truth,
+            "models": model_names,
+        }
+
+    if not prepared:
         return None
 
     best_objective = float("-inf")
@@ -552,17 +574,20 @@ def _optimise_combined_scores(
     def _evaluate_weights(weight_pair: Tuple[float, float]) -> None:
         nonlocal best_objective, best_weights, best_dataset_taus
 
-        combined = weight_pair[0] * msci_norm + weight_pair[1] * cmi_norm
         aggregate = 0.0
         total_weight = 0.0
         per_dataset_tau: Dict[str, float] = {}
 
-        for dataset, (indices, truth) in dataset_overlaps.items():
-            tau, _ = weightedtau(combined[indices], truth)
+        for dataset, payload in prepared.items():
+            combined_all = weight_pair[0] * payload["msci_norm"] + weight_pair[1] * payload[
+                "cmi_norm"
+            ]
+            combined_overlap = combined_all[payload["indices"]]
+            tau, _ = weightedtau(combined_overlap, payload["truth"])
             if math.isnan(tau):
                 continue
             per_dataset_tau[dataset] = float(tau)
-            weight = float(len(truth))
+            weight = float(len(payload["truth"]))
             aggregate += weight * float(tau)
             total_weight += weight
 
@@ -587,56 +612,76 @@ def _optimise_combined_scores(
     if best_objective == float("-inf"):
         return None
 
-    combined_all = best_weights[0] * msci_norm + best_weights[1] * cmi_norm
-    combined_scores = {
-        model: float(score) for model, score in zip(model_names, combined_all)
-    }
+    combined_scores: Dict[str, Dict[str, float]] = {}
+    for dataset, payload in prepared.items():
+        combined_all = (
+            best_weights[0] * payload["msci_norm"] + best_weights[1] * payload["cmi_norm"]
+        )
+        combined_scores[dataset] = {
+            model: float(score)
+            for model, score in zip(payload["models"], combined_all, strict=False)
+        }
 
     return best_weights, best_dataset_taus, combined_scores
 
 
 def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     device = torch.device(args.device)
-    aggregated_results: Dict[str, object] = {}
-    json_payload: Dict[str, object] = {}
-    collected_scores: Dict[str, Dict[str, float]] = {}
+    aggregated_results: Dict[str, Dict[str, object]] = {}
+    json_payload: Dict[str, Dict[str, object]] = {}
+    collected_scores: Dict[str, Dict[str, Dict[str, float]]] = {}
 
     requested_datasets = _normalise_dataset_argument(args.dataset)
     multi_dataset = len(requested_datasets) > 1
 
-    dataset_for_features: Optional[str] = None
-    for candidate in requested_datasets:
-        if candidate in DEFAULT_DATASET_MODEL_PATHS:
-            dataset_for_features = candidate
-            break
-    if dataset_for_features is None and DEFAULT_DATASET_MODEL_PATHS:
-        dataset_for_features = next(iter(DEFAULT_DATASET_MODEL_PATHS))
-
-    dataset_map = (
-        DEFAULT_DATASET_MODEL_PATHS.get(dataset_for_features, {})
-        if dataset_for_features is not None
-        else {}
-    )
-    entries: list[tuple[str, str]] = []
+    entries_by_dataset: Dict[str, list[tuple[str, str]]] = {}
 
     if args.features:
+        dataset_for_features: Optional[str] = None
+        for candidate in requested_datasets:
+            if candidate in DEFAULT_DATASET_MODEL_PATHS:
+                dataset_for_features = candidate
+                break
+        if dataset_for_features is None and DEFAULT_DATASET_MODEL_PATHS:
+            dataset_for_features = next(iter(DEFAULT_DATASET_MODEL_PATHS))
+
+        dataset_key = dataset_for_features or "custom"
+        dataset_map = DEFAULT_DATASET_MODEL_PATHS.get(dataset_for_features or "", {})
         reverse_lookup = {
             str(Path(path).expanduser().resolve()): model_name
             for model_name, path in dataset_map.items()
         }
+        feature_entries: list[tuple[str, str]] = []
         for feature_path in args.features:
             resolved = str(Path(feature_path).expanduser().resolve())
             model_name = reverse_lookup.get(resolved, Path(feature_path).stem)
-            entries.append((model_name, feature_path))
+            feature_entries.append((model_name, feature_path))
+        entries_by_dataset[dataset_key] = feature_entries
     else:
-        if not dataset_map:
-            raise ValueError(
-                "No feature paths provided and no default dataset entries available for the requested dataset(s)."
-            )
-        entries.extend(dataset_map.items())
+        for dataset in requested_datasets:
+            dataset_map = DEFAULT_DATASET_MODEL_PATHS.get(dataset)
+            if not dataset_map:
+                continue
+            entries_by_dataset[dataset] = list(dataset_map.items())
 
-    for model_name, feature_path in entries:
-        print(f"\n=== Evaluating {model_name}: {feature_path} ===")
+        if not entries_by_dataset and DEFAULT_DATASET_MODEL_PATHS:
+            dataset, dataset_map = next(iter(DEFAULT_DATASET_MODEL_PATHS.items()))
+            entries_by_dataset[dataset] = list(dataset_map.items())
+
+    if not entries_by_dataset:
+        raise ValueError(
+            "No feature paths provided and no default dataset entries available for the requested dataset(s)."
+        )
+
+    multi_dataset_features = len(entries_by_dataset) > 1
+
+    for dataset_name, entries in entries_by_dataset.items():
+        if multi_dataset_features:
+            print(f"\n### Dataset: {dataset_name}")
+        for model_name, feature_path in entries:
+            print(
+                f"\n=== Evaluating {model_name} ({dataset_name}): {feature_path} ==="
+            )
         (
             image_embeddings,
             text_embeddings,
@@ -668,10 +713,12 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
 
         cmi_avg = float(sum(r.cmi_lb for r in cmi_results.values()) / len(cmi_results))
 
-        collected_scores[model_name] = {
+        collected_scores.setdefault(dataset_name, {})[model_name] = {
             "msci": float(msci_result.msci),
             "cmi_lb_mean": cmi_avg,
-            "cmi_lb_per_mag": {mag: float(cmi_results[mag].cmi_lb) for mag in magnifications},
+            "cmi_lb_per_mag": {
+                mag: float(cmi_results[mag].cmi_lb) for mag in magnifications
+            },
         }
 
         print("--- MSCI ---")
@@ -689,14 +736,16 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
             )
         print(f"Average CMI-LB across magnifications: {cmi_avg:.6f}")
 
-        aggregated_results[feature_path] = {
+        aggregated_results.setdefault(dataset_name, {})[feature_path] = {
             "msci": msci_result,
             "cmi_lb": cmi_results,
             "cmi_lb_mean": cmi_avg,
         }
 
         if args.json:
-            json_payload[feature_path] = _summarise_for_json(msci_result, cmi_results, cmi_avg)
+            json_payload.setdefault(dataset_name, {})[feature_path] = _summarise_for_json(
+                msci_result, cmi_results, cmi_avg
+            )
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
@@ -732,11 +781,19 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
             print(
                 f"{descriptor} (w_msci={weights[0]:.3f}, w_cmi={weights[1]:.3f})"
             )
-            print("Combined weighted scores:")
             combined_label = "combined_global" if multi_dataset else "combined"
-            for name, value in combined_scores.items():
-                collected_scores.setdefault(name, {})[combined_label] = value
-                print(f"  {name}: {value:.6f}")
+            for dataset_name, dataset_scores in combined_scores.items():
+                prefix = (
+                    f"Combined weighted scores for {dataset_name}:"
+                    if multi_dataset
+                    else "Combined weighted scores:"
+                )
+                print(prefix)
+                for name, value in dataset_scores.items():
+                    collected_scores.setdefault(dataset_name, {}).setdefault(name, {})[
+                        combined_label
+                    ] = value
+                    print(f"  {name}: {value:.6f}")
 
         for dataset in requested_datasets:
             gt = ground_truth.get(dataset)
@@ -748,15 +805,24 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                 )
                 continue
 
+            dataset_scores = collected_scores.get(dataset)
+            if not dataset_scores:
+                warnings.warn(
+                    f"No computed scores available for dataset '{dataset}'. Skipping benchmarking.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
+
             msci_tau = _compute_weighted_kendall_tau(
-                {name: scores["msci"] for name, scores in collected_scores.items()}, gt
+                {name: scores["msci"] for name, scores in dataset_scores.items()}, gt
             )
             if msci_tau is not None:
                 print(
                     f"Kendall tau_w (MSCI vs ground truth) for {dataset}: {msci_tau:.6f}"
                 )
             cmi_tau = _compute_weighted_kendall_tau(
-                {name: scores["cmi_lb_mean"] for name, scores in collected_scores.items()}, gt
+                {name: scores["cmi_lb_mean"] for name, scores in dataset_scores.items()}, gt
             )
             if cmi_tau is not None:
                 print(
@@ -786,7 +852,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
 
             # Evaluate per-magnification CMI-LB correlations
             per_mag_scores: Dict[int, Dict[str, float]] = {}
-            for name, scores in collected_scores.items():
+            for name, scores in dataset_scores.items():
                 per_mag = scores.get("cmi_lb_per_mag", {})
                 if not isinstance(per_mag, Mapping):
                     continue
