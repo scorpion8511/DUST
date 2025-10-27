@@ -519,110 +519,120 @@ def _optimise_combined_scores(
     dataset_truths: Mapping[str, Mapping[str, float]],
     search_space: Sequence[float],
 ) -> Optional[
-    Tuple[Tuple[float, float], Dict[str, float], Dict[str, Dict[str, float]]]
+    Tuple[Tuple[float, float], Dict[str, float], Dict[str, Dict[str, float]], float]
 ]:
-    """Search for shared MSCI/CMI-LB weights across multiple datasets."""
+    """Grid-search a single global MSCI/CMI-LB blend across all datasets."""
 
     if not per_dataset_scores or not dataset_truths:
         return None
 
-    prepared: Dict[str, Dict[str, object]] = {}
+    weight_candidates = list(search_space)
+    if not weight_candidates:
+        return None
+
+    all_msci: list[float] = []
+    all_cmi: list[float] = []
+    for dataset_scores in per_dataset_scores.values():
+        for score_payload in dataset_scores.values():
+            try:
+                all_msci.append(float(score_payload["msci"]))
+                all_cmi.append(float(score_payload["cmi_lb_mean"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    if not all_msci or not all_cmi:
+        return None
+
+    msci_mean = float(np.mean(all_msci))
+    msci_std = float(np.std(all_msci)) or 1.0
+    cmi_mean = float(np.mean(all_cmi))
+    cmi_std = float(np.std(all_cmi)) or 1.0
+
+    entries: list[tuple[str, str, float, float, float]] = []
+    dataset_indices: Dict[str, list[int]] = {}
 
     for dataset, truth_map in dataset_truths.items():
         scores = per_dataset_scores.get(dataset)
         if not scores:
             continue
+        for model_name, truth_value in truth_map.items():
+            model_scores = scores.get(model_name)
+            if not model_scores:
+                continue
+            try:
+                msci_val = float(model_scores["msci"])
+                cmi_val = float(model_scores["cmi_lb_mean"])
+                truth_val = float(truth_value)
+            except (KeyError, TypeError, ValueError):
+                continue
+            entry_index = len(entries)
+            entries.append((dataset, model_name, truth_val, msci_val, cmi_val))
+            dataset_indices.setdefault(dataset, []).append(entry_index)
 
-        model_names = list(scores.keys())
-        if len(model_names) < 2:
-            continue
-
-        msci_values = np.array(
-            [scores[name]["msci"] for name in model_names], dtype=float
-        )
-        cmi_values = np.array(
-            [scores[name]["cmi_lb_mean"] for name in model_names], dtype=float
-        )
-
-        msci_std = msci_values.std()
-        cmi_std = cmi_values.std()
-        msci_norm = (msci_values - msci_values.mean()) / (msci_std if msci_std else 1.0)
-        cmi_norm = (cmi_values - cmi_values.mean()) / (cmi_std if cmi_std else 1.0)
-
-        overlap = [name for name in model_names if name in truth_map]
-        if len(overlap) < 2:
-            continue
-
-        indices = np.array([model_names.index(name) for name in overlap], dtype=int)
-        truth = np.array([truth_map[name] for name in overlap], dtype=float)
-
-        prepared[dataset] = {
-            "msci_norm": msci_norm,
-            "cmi_norm": cmi_norm,
-            "indices": indices,
-            "truth": truth,
-            "models": model_names,
-        }
-
-    if not prepared:
+    if len(entries) < 2:
         return None
 
-    best_objective = float("-inf")
+    truths = np.array([item[2] for item in entries], dtype=float)
+    msci_values = np.array([item[3] for item in entries], dtype=float)
+    cmi_values = np.array([item[4] for item in entries], dtype=float)
+
+    msci_norm = (msci_values - msci_mean) / msci_std
+    cmi_norm = (cmi_values - cmi_mean) / cmi_std
+
+    best_tau = float("-inf")
     best_weights: Tuple[float, float] = (0.0, 0.0)
     best_dataset_taus: Dict[str, float] = {}
 
-    def _evaluate_weights(weight_pair: Tuple[float, float]) -> None:
-        nonlocal best_objective, best_weights, best_dataset_taus
-
-        aggregate = 0.0
-        total_weight = 0.0
-        per_dataset_tau: Dict[str, float] = {}
-
-        for dataset, payload in prepared.items():
-            combined_all = weight_pair[0] * payload["msci_norm"] + weight_pair[1] * payload[
-                "cmi_norm"
-            ]
-            combined_overlap = combined_all[payload["indices"]]
-            tau, _ = weightedtau(combined_overlap, payload["truth"])
-            if math.isnan(tau):
-                continue
-            per_dataset_tau[dataset] = float(tau)
-            weight = float(len(payload["truth"]))
-            aggregate += weight * float(tau)
-            total_weight += weight
-
-        if not per_dataset_tau:
-            return
-
-        objective = aggregate / total_weight if total_weight else float(
-            np.mean(list(per_dataset_tau.values()))
-        )
-
-        if objective > best_objective:
-            best_objective = objective
-            best_weights = (float(weight_pair[0]), float(weight_pair[1]))
-            best_dataset_taus = per_dataset_tau
-
-    for w_msci in search_space:
-        for w_cmi in search_space:
+    for w_msci in weight_candidates:
+        for w_cmi in weight_candidates:
             if abs(w_msci) < 1e-12 and abs(w_cmi) < 1e-12:
                 continue
-            _evaluate_weights((float(w_msci), float(w_cmi)))
 
-    if best_objective == float("-inf"):
+            combined = float(w_msci) * msci_norm + float(w_cmi) * cmi_norm
+            tau, _ = weightedtau(combined, truths)
+            if math.isnan(tau):
+                continue
+
+            dataset_tau_map: Dict[str, float] = {}
+            for dataset, indices in dataset_indices.items():
+                if len(indices) < 2:
+                    continue
+                dataset_preds = combined[indices]
+                dataset_truths_arr = truths[indices]
+                dataset_tau, _ = weightedtau(dataset_preds, dataset_truths_arr)
+                if math.isnan(dataset_tau):
+                    continue
+                dataset_tau_map[dataset] = float(dataset_tau)
+
+            if tau > best_tau:
+                best_tau = float(tau)
+                best_weights = (float(w_msci), float(w_cmi))
+                best_dataset_taus = dataset_tau_map
+
+    if best_tau == float("-inf"):
         return None
 
     combined_scores: Dict[str, Dict[str, float]] = {}
-    for dataset, payload in prepared.items():
-        combined_all = (
-            best_weights[0] * payload["msci_norm"] + best_weights[1] * payload["cmi_norm"]
-        )
-        combined_scores[dataset] = {
-            model: float(score)
-            for model, score in zip(payload["models"], combined_all, strict=False)
-        }
+    for dataset, scores in per_dataset_scores.items():
+        combined_scores[dataset] = {}
+        for model_name, payload in scores.items():
+            try:
+                msci_val = float(payload["msci"])
+                cmi_val = float(payload["cmi_lb_mean"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            msci_component = (msci_val - msci_mean) / msci_std
+            cmi_component = (cmi_val - cmi_mean) / cmi_std
+            combined_scores[dataset][model_name] = float(
+                best_weights[0] * msci_component + best_weights[1] * cmi_component
+            )
 
-    return best_weights, best_dataset_taus, combined_scores
+    print(
+        "Optimized global weights: "
+        f"(w_msci={best_weights[0]:.3f}, w_cmi={best_weights[1]:.3f}) -> tau={best_tau:.6f}"
+    )
+
+    return best_weights, best_dataset_taus, combined_scores, best_tau
 
 
 def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
@@ -772,7 +782,12 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
         )
 
         if joint_optimisation is not None:
-            weights, _, combined_scores = joint_optimisation
+            (
+                weights,
+                dataset_taus,
+                combined_scores,
+                global_tau,
+            ) = joint_optimisation
             descriptor = (
                 "Optimal global combined weights"
                 if multi_dataset
@@ -781,6 +796,11 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
             print(
                 f"{descriptor} (w_msci={weights[0]:.3f}, w_cmi={weights[1]:.3f})"
             )
+            if math.isfinite(global_tau):
+                scope = "all datasets" if multi_dataset else "dataset overlap"
+                print(
+                    f"Global Kendall tau_w across {scope}: {global_tau:.6f}"
+                )
             combined_label = "combined_global" if multi_dataset else "combined"
             for dataset_name, dataset_scores in combined_scores.items():
                 prefix = (
@@ -788,11 +808,12 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                     if multi_dataset
                     else "Combined weighted scores:"
                 )
-                print(prefix)
+                if dataset_scores:
+                    print(prefix)
                 for name, value in dataset_scores.items():
                     collected_scores.setdefault(dataset_name, {}).setdefault(name, {})[
                         combined_label
-                    ] = value
+                    ] = float(value)
                     print(f"  {name}: {value:.6f}")
 
         for dataset in requested_datasets:
@@ -830,7 +851,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                 )
 
             if joint_optimisation is not None:
-                weights, dataset_taus, _ = joint_optimisation
+                weights, dataset_taus, _, _ = joint_optimisation
                 tau_value = dataset_taus.get(dataset)
                 if tau_value is not None:
                     descriptor = (
