@@ -518,12 +518,10 @@ def _optimise_combined_scores(
     collected_scores: Dict[str, Dict[str, float]],
     dataset_truths: Mapping[str, Mapping[str, float]],
     search_space: Sequence[float],
-    *,
-    single_weight: bool = False,
 ) -> Optional[
-    Tuple[Tuple[float, float], Dict[str, float], Dict[str, float], Optional[float]]
+    Tuple[Tuple[float, float], Dict[str, float], Dict[str, float], float]
 ]:
-    """Search for the best linear combination of MSCI and CMI-LB metrics."""
+    """Search for a single shared weight combining MSCI and CMI-LB metrics."""
 
     if not collected_scores or not dataset_truths:
         return None
@@ -554,7 +552,7 @@ def _optimise_combined_scores(
     best_dataset_taus: Dict[str, float] = {}
     best_single_weight: Optional[float] = None
 
-    def _evaluate_weights(weight_pair: Tuple[float, float], single_value: Optional[float]) -> None:
+    def _evaluate_weights(weight_pair: Tuple[float, float], single_value: float) -> None:
         nonlocal best_objective, best_weights, best_dataset_taus, best_single_weight
 
         combined = weight_pair[0] * msci_norm + weight_pair[1] * cmi_norm
@@ -584,18 +582,11 @@ def _optimise_combined_scores(
             best_dataset_taus = per_dataset_tau
             best_single_weight = single_value
 
-    if single_weight:
-        for w in search_space:
-            weight_pair = (float(w), float(1.0 - w))
-            _evaluate_weights(weight_pair, float(w))
-    else:
-        for w_msci in search_space:
-            for w_cmi in search_space:
-                if abs(w_msci) < 1e-12 and abs(w_cmi) < 1e-12:
-                    continue
-                _evaluate_weights((float(w_msci), float(w_cmi)), None)
+    for w in search_space:
+        weight_pair = (float(w), float(1.0 - w))
+        _evaluate_weights(weight_pair, float(w))
 
-    if best_objective == float("-inf"):
+    if best_objective == float("-inf") or best_single_weight is None:
         return None
 
     combined_all = best_weights[0] * msci_norm + best_weights[1] * cmi_norm
@@ -731,7 +722,6 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
             collected_scores,
             dataset_truths,
             search_space,
-            single_weight=args.single_weight,
         )
 
         if joint_optimisation is not None:
@@ -741,14 +731,9 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                 if multi_dataset
                 else "Optimal combined weights"
             )
-            if single_weight_value is not None:
-                print(
-                    f"{descriptor} (w_msci={weights[0]:.3f}, w_cmi={weights[1]:.3f}, single_weight={single_weight_value:.3f})"
-                )
-            else:
-                print(
-                    f"{descriptor} (w_msci={weights[0]:.3f}, w_cmi={weights[1]:.3f})"
-                )
+            print(
+                f"{descriptor} (single_weight={single_weight_value:.3f}; w_msci={weights[0]:.3f}, w_cmi={weights[1]:.3f})"
+            )
             print("Combined weighted scores:")
             combined_label = "combined_global" if multi_dataset else "combined"
             for name, value in combined_scores.items():
@@ -792,8 +777,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                     summary = (
                         f"Kendall tau_w ({descriptor} vs ground truth) for {dataset}: {tau_value:.6f}"
                     )
-                    if single_weight_value is not None:
-                        summary += f" (single_weight={single_weight_value:.3f})"
+                    summary += f" (single_weight={single_weight_value:.3f})"
                     print(summary)
                 else:
                     print(
@@ -899,27 +883,19 @@ def build_argparser() -> argparse.ArgumentParser:
         "--weight-min",
         type=float,
         default=-1.0,
-        help="Minimum weight value when searching MSCI/CMI-LB combinations.",
+        help="Minimum MSCI weight value when searching the shared combination.",
     )
     parser.add_argument(
         "--weight-max",
         type=float,
         default=1.0,
-        help="Maximum weight value when searching MSCI/CMI-LB combinations.",
+        help="Maximum MSCI weight value when searching the shared combination.",
     )
     parser.add_argument(
         "--weight-steps",
         type=int,
         default=41,
-        help="Number of grid points per axis for the combined weight search.",
-    )
-    parser.add_argument(
-        "--single-weight",
-        action="store_true",
-        help=(
-            "Restrict the combined MSCI/CMI optimisation to a single global weight parameter "
-            "(w_msci = w, w_cmi = 1 - w)."
-        ),
+        help="Number of grid points to evaluate when searching the shared weight.",
     )
     return parser
 
