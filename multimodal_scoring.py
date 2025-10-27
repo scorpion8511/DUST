@@ -518,7 +518,11 @@ def _optimise_combined_scores(
     collected_scores: Dict[str, Dict[str, float]],
     dataset_truths: Mapping[str, Mapping[str, float]],
     search_space: Sequence[float],
-) -> Optional[Tuple[Tuple[float, float], Dict[str, float], Dict[str, float]]]:
+    *,
+    single_weight: bool = False,
+) -> Optional[
+    Tuple[Tuple[float, float], Dict[str, float], Dict[str, float], Optional[float]]
+]:
     """Search for the best linear combination of MSCI and CMI-LB metrics."""
 
     if not collected_scores or not dataset_truths:
@@ -548,37 +552,48 @@ def _optimise_combined_scores(
     best_objective = float("-inf")
     best_weights: Tuple[float, float] = (0.0, 0.0)
     best_dataset_taus: Dict[str, float] = {}
+    best_single_weight: Optional[float] = None
 
-    for w_msci in search_space:
-        for w_cmi in search_space:
-            if abs(w_msci) < 1e-12 and abs(w_cmi) < 1e-12:
+    def _evaluate_weights(weight_pair: Tuple[float, float], single_value: Optional[float]) -> None:
+        nonlocal best_objective, best_weights, best_dataset_taus, best_single_weight
+
+        combined = weight_pair[0] * msci_norm + weight_pair[1] * cmi_norm
+        aggregate = 0.0
+        total_weight = 0.0
+        per_dataset_tau: Dict[str, float] = {}
+
+        for dataset, (indices, truth) in dataset_overlaps.items():
+            tau, _ = weightedtau(combined[indices], truth)
+            if math.isnan(tau):
                 continue
+            per_dataset_tau[dataset] = float(tau)
+            weight = float(len(truth))
+            aggregate += weight * float(tau)
+            total_weight += weight
 
-            combined = w_msci * msci_norm + w_cmi * cmi_norm
-            aggregate = 0.0
-            total_weight = 0.0
-            per_dataset_tau: Dict[str, float] = {}
+        if not per_dataset_tau:
+            return
 
-            for dataset, (indices, truth) in dataset_overlaps.items():
-                tau, _ = weightedtau(combined[indices], truth)
-                if math.isnan(tau):
+        objective = aggregate / total_weight if total_weight else float(
+            np.mean(list(per_dataset_tau.values()))
+        )
+
+        if objective > best_objective:
+            best_objective = objective
+            best_weights = (float(weight_pair[0]), float(weight_pair[1]))
+            best_dataset_taus = per_dataset_tau
+            best_single_weight = single_value
+
+    if single_weight:
+        for w in search_space:
+            weight_pair = (float(w), float(1.0 - w))
+            _evaluate_weights(weight_pair, float(w))
+    else:
+        for w_msci in search_space:
+            for w_cmi in search_space:
+                if abs(w_msci) < 1e-12 and abs(w_cmi) < 1e-12:
                     continue
-                per_dataset_tau[dataset] = float(tau)
-                weight = float(len(truth))
-                aggregate += weight * float(tau)
-                total_weight += weight
-
-            if not per_dataset_tau:
-                continue
-
-            objective = aggregate / total_weight if total_weight else float(
-                np.mean(list(per_dataset_tau.values()))
-            )
-
-            if objective > best_objective:
-                best_objective = objective
-                best_weights = (float(w_msci), float(w_cmi))
-                best_dataset_taus = per_dataset_tau
+                _evaluate_weights((float(w_msci), float(w_cmi)), None)
 
     if best_objective == float("-inf"):
         return None
@@ -588,7 +603,7 @@ def _optimise_combined_scores(
         model: float(score) for model, score in zip(model_names, combined_all)
     }
 
-    return best_weights, best_dataset_taus, combined_scores
+    return best_weights, best_dataset_taus, combined_scores, best_single_weight
 
 
 def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
@@ -716,18 +731,24 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
             collected_scores,
             dataset_truths,
             search_space,
+            single_weight=args.single_weight,
         )
 
         if joint_optimisation is not None:
-            (weights, _, combined_scores) = joint_optimisation
+            (weights, _, combined_scores, single_weight_value) = joint_optimisation
             descriptor = (
                 "Optimal global combined weights"
                 if multi_dataset
                 else "Optimal combined weights"
             )
-            print(
-                f"{descriptor} (w_msci={weights[0]:.3f}, w_cmi={weights[1]:.3f})"
-            )
+            if single_weight_value is not None:
+                print(
+                    f"{descriptor} (w_msci={weights[0]:.3f}, w_cmi={weights[1]:.3f}, single_weight={single_weight_value:.3f})"
+                )
+            else:
+                print(
+                    f"{descriptor} (w_msci={weights[0]:.3f}, w_cmi={weights[1]:.3f})"
+                )
             print("Combined weighted scores:")
             combined_label = "combined_global" if multi_dataset else "combined"
             for name, value in combined_scores.items():
@@ -760,7 +781,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                 )
 
             if joint_optimisation is not None:
-                weights, dataset_taus, _ = joint_optimisation
+                weights, dataset_taus, _, single_weight_value = joint_optimisation
                 tau_value = dataset_taus.get(dataset)
                 if tau_value is not None:
                     descriptor = (
@@ -768,9 +789,12 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                         if multi_dataset
                         else "combined weights"
                     )
-                    print(
+                    summary = (
                         f"Kendall tau_w ({descriptor} vs ground truth) for {dataset}: {tau_value:.6f}"
                     )
+                    if single_weight_value is not None:
+                        summary += f" (single_weight={single_weight_value:.3f})"
+                    print(summary)
                 else:
                     print(
                         "Unable to derive combined MSCI/CMI-LB weights for benchmarking; insufficient ground-truth overlap."
@@ -888,6 +912,14 @@ def build_argparser() -> argparse.ArgumentParser:
         type=int,
         default=41,
         help="Number of grid points per axis for the combined weight search.",
+    )
+    parser.add_argument(
+        "--single-weight",
+        action="store_true",
+        help=(
+            "Restrict the combined MSCI/CMI optimisation to a single global weight parameter "
+            "(w_msci = w, w_cmi = 1 - w)."
+        ),
     )
     return parser
 
