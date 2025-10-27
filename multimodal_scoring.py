@@ -46,7 +46,14 @@ DEFAULT_GROUND_TRUTH: Dict[str, Dict[str, float]] = {
         "musk": 0.65,
         "conch": 0.58,
         "pathgen": 0.60,
-    }
+    },
+    "CAM": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
 }
 
 DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, str]] = {
@@ -55,7 +62,14 @@ DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, str]] = {
         "musk": "/home/jovyan/work/tran_est/MUST/features/musk_features02.pth",
         "conch": "/home/jovyan/work/tran_est/MUST/features/conch_features02.pth",
         "pathgen": "/home/jovyan/work/tran_est/MUST/features/pathgen_features02.pth",
-    }
+    },
+    "CAM": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_cam/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_cam/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_cam/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_cam/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_cam/biomed_features.pth",
+    },
 }
 
 
@@ -473,6 +487,33 @@ def _load_ground_truth(path: Optional[str]) -> Dict[str, Dict[str, float]]:
     }
 
 
+def _normalise_dataset_argument(
+    dataset: Optional[Sequence[str] | str],
+) -> Tuple[str, ...]:
+    """Normalise dataset CLI arguments into a tuple of dataset identifiers."""
+
+    if dataset is None:
+        return tuple(DEFAULT_GROUND_TRUTH.keys())
+
+    if isinstance(dataset, str):
+        parts = [item.strip() for item in dataset.split(",") if item.strip()]
+        return tuple(parts) if parts else tuple(DEFAULT_GROUND_TRUTH.keys())
+
+    normalised: list[str] = []
+    for item in dataset:
+        if item is None:
+            continue
+        for part in str(item).split(","):
+            part = part.strip()
+            if part and part not in normalised:
+                normalised.append(part)
+
+    if not normalised:
+        return tuple(DEFAULT_GROUND_TRUTH.keys())
+
+    return tuple(normalised)
+
+
 def _optimise_combined_scores(
     collected_scores: Dict[str, Dict[str, float]],
     ground_truth: Mapping[str, float],
@@ -533,7 +574,22 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     json_payload: Dict[str, object] = {}
     collected_scores: Dict[str, Dict[str, float]] = {}
 
-    dataset_map = DEFAULT_DATASET_MODEL_PATHS.get(args.dataset, {})
+    requested_datasets = _normalise_dataset_argument(args.dataset)
+    multi_dataset = len(requested_datasets) > 1
+
+    dataset_for_features: Optional[str] = None
+    for candidate in requested_datasets:
+        if candidate in DEFAULT_DATASET_MODEL_PATHS:
+            dataset_for_features = candidate
+            break
+    if dataset_for_features is None and DEFAULT_DATASET_MODEL_PATHS:
+        dataset_for_features = next(iter(DEFAULT_DATASET_MODEL_PATHS))
+
+    dataset_map = (
+        DEFAULT_DATASET_MODEL_PATHS.get(dataset_for_features, {})
+        if dataset_for_features is not None
+        else {}
+    )
     entries: list[tuple[str, str]] = []
 
     if args.features:
@@ -548,7 +604,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     else:
         if not dataset_map:
             raise ValueError(
-                "No feature paths provided and no default dataset entries available for the requested dataset."
+                "No feature paths provided and no default dataset entries available for the requested dataset(s)."
             )
         entries.extend(dataset_map.items())
 
@@ -620,61 +676,72 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
             json.dump(json_payload, handle, indent=2)
 
     ground_truth = _load_ground_truth(args.ground_truth)
-    dataset = args.dataset
-    if collected_scores and dataset in ground_truth:
-        gt = ground_truth[dataset]
-        msci_tau = _compute_weighted_kendall_tau(
-            {name: scores["msci"] for name, scores in collected_scores.items()}, gt
-        )
-        if msci_tau is not None:
-            print(
-                f"Kendall tau_w (MSCI vs ground truth) for {dataset}: {msci_tau:.6f}"
-            )
-        cmi_tau = _compute_weighted_kendall_tau(
-            {name: scores["cmi_lb_mean"] for name, scores in collected_scores.items()}, gt
-        )
-        if cmi_tau is not None:
-            print(
-                f"Kendall tau_w (CMI-LB mean vs ground truth) for {dataset}: {cmi_tau:.6f}"
-            )
+    search_space = np.linspace(args.weight_min, args.weight_max, args.weight_steps)
 
-        optimisation = _optimise_combined_scores(
-            collected_scores,
-            gt,
-            np.linspace(args.weight_min, args.weight_max, args.weight_steps),
-        )
-        if optimisation is not None:
-            weights, combined_tau, combined_scores = optimisation
-            print(
-                "Optimal combined weights (w_msci={:.3f}, w_cmi={:.3f}) -> Kendall tau_w={:.6f}".format(
-                    weights[0], weights[1], combined_tau
+    if collected_scores:
+        for dataset in requested_datasets:
+            gt = ground_truth.get(dataset)
+            if not gt:
+                warnings.warn(
+                    f"No ground-truth accuracies found for dataset '{dataset}'. Skipping benchmarking.",
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
-            )
-            print("Combined weighted scores:")
-            for name, value in combined_scores.items():
-                collected_scores[name]["combined"] = value
-                print(f"  {name}: {value:.6f}")
-        else:
-            print(
-                "Unable to derive combined MSCI/CMI-LB weights for benchmarking; insufficient ground-truth overlap."
-            )
-
-        # Evaluate per-magnification CMI-LB correlations
-        per_mag_scores: Dict[int, Dict[str, float]] = {}
-        for name, scores in collected_scores.items():
-            per_mag = scores.get("cmi_lb_per_mag", {})
-            if not isinstance(per_mag, Mapping):
                 continue
-            for mag, value in per_mag.items():
-                per_mag_scores.setdefault(int(mag), {})[name] = float(value)
 
-        for mag in sorted(per_mag_scores):
-            tau_mag = _compute_weighted_kendall_tau(per_mag_scores[mag], gt)
-            if tau_mag is None:
-                continue
-            print(
-                f"Kendall tau_w (CMI-LB at {mag}x vs ground truth) for {dataset}: {tau_mag:.6f}"
+            msci_tau = _compute_weighted_kendall_tau(
+                {name: scores["msci"] for name, scores in collected_scores.items()}, gt
             )
+            if msci_tau is not None:
+                print(
+                    f"Kendall tau_w (MSCI vs ground truth) for {dataset}: {msci_tau:.6f}"
+                )
+            cmi_tau = _compute_weighted_kendall_tau(
+                {name: scores["cmi_lb_mean"] for name, scores in collected_scores.items()}, gt
+            )
+            if cmi_tau is not None:
+                print(
+                    f"Kendall tau_w (CMI-LB mean vs ground truth) for {dataset}: {cmi_tau:.6f}"
+                )
+
+            optimisation = _optimise_combined_scores(
+                collected_scores,
+                gt,
+                search_space,
+            )
+            if optimisation is not None:
+                (w_msci, w_cmi), combined_tau, combined_scores = optimisation
+                print(
+                    "Optimal combined weights (w_msci={:.3f}, w_cmi={:.3f}) -> Kendall tau_w={:.6f}".format(
+                        w_msci, w_cmi, combined_tau
+                    )
+                )
+                print("Combined weighted scores:")
+                for name, value in combined_scores.items():
+                    combined_key = "combined" if not multi_dataset else f"combined_{dataset}"
+                    collected_scores[name][combined_key] = value
+                    print(f"  {name}: {value:.6f}")
+            else:
+                print(
+                    "Unable to derive combined MSCI/CMI-LB weights for benchmarking; insufficient ground-truth overlap."
+                )
+
+            # Evaluate per-magnification CMI-LB correlations
+            per_mag_scores: Dict[int, Dict[str, float]] = {}
+            for name, scores in collected_scores.items():
+                per_mag = scores.get("cmi_lb_per_mag", {})
+                if not isinstance(per_mag, Mapping):
+                    continue
+                for mag, value in per_mag.items():
+                    per_mag_scores.setdefault(int(mag), {})[name] = float(value)
+
+            for mag in sorted(per_mag_scores):
+                tau_mag = _compute_weighted_kendall_tau(per_mag_scores[mag], gt)
+                if tau_mag is None:
+                    continue
+                print(
+                    f"Kendall tau_w (CMI-LB at {mag}x vs ground truth) for {dataset}: {tau_mag:.6f}"
+                )
 
     return aggregated_results
 
@@ -743,8 +810,12 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset",
         type=str,
-        default="TCGA",
-        help="Dataset key used to select ground-truth accuracies.",
+        nargs="+",
+        default=None,
+        help=(
+            "Dataset key(s) used to select ground-truth accuracies. Provide multiple names "
+            "separated by spaces or commas to benchmark against several datasets (defaults to all available)."
+        ),
     )
     parser.add_argument(
         "--weight-min",
