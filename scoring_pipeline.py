@@ -1149,8 +1149,10 @@ def derive_optimal_weights(
             for m in metric_names:
                 entries[model][m] *= metric_signs[m]
 
-    best_tau = -2.0
+    best_tau = float("-inf")
+    best_min_tau = float("-inf")
     best_weights = tuple(float(w) for w in default)
+    best_all_nonneg = False
     for weight_combo in product(search_space, repeat=len(metric_names)):
         taus = []
         for entries in normed.values():
@@ -1171,12 +1173,39 @@ def derive_optimal_weights(
                 if np.isnan(tau):
                     tau = -2.0
             taus.append(tau)
-        mean_tau = float(np.mean(taus)) if taus else -2.0
-        if mean_tau > best_tau:
+        if not taus:
+            continue
+        mean_tau = float(np.mean(taus))
+        min_tau = float(np.min(taus))
+        all_nonneg = all(tau >= 0.0 for tau in taus)
+
+        candidate_better = False
+        if all_nonneg:
+            if (not best_all_nonneg) or (mean_tau > best_tau) or (
+                np.isclose(mean_tau, best_tau)
+                and min_tau > best_min_tau
+            ):
+                candidate_better = True
+        elif not best_all_nonneg:
+            if (mean_tau > best_tau) or (
+                np.isclose(mean_tau, best_tau) and min_tau > best_min_tau
+            ):
+                candidate_better = True
+
+        if candidate_better:
             best_tau = mean_tau
+            best_min_tau = min_tau
             best_weights = tuple(float(w) for w in weight_combo)
+            best_all_nonneg = all_nonneg
     print(
-        f"Optimized global weights: {best_weights} (tau={best_tau}) for metrics {metric_names}"
+        "Optimized global weights: {} (mean_tau={}, min_tau={}, all_nonnegative={}) "
+        "for metrics {}".format(
+            best_weights,
+            best_tau,
+            best_min_tau,
+            best_all_nonneg,
+            metric_names,
+        )
     )
     signs_tuple = tuple(metric_signs[m] for m in metric_names)
     return best_weights, signs_tuple
