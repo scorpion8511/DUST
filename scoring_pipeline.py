@@ -1235,6 +1235,52 @@ def compute_kendall_tau_across_datasets(
     return taus
 
 
+def report_combined_scores(
+    all_scores: Dict[str, Dict[str, Dict[str, float]]],
+    ground_truth: Dict[str, Dict[str, float]],
+    metric_names: Sequence[str],
+) -> None:
+    """Print combined scores for models contributing to Kendall tau."""
+
+    print(
+        "Combined scores for metrics {} used in Kendall tau calculation:".format(
+            ", ".join(metric_names)
+        )
+    )
+    for dataset, model_scores in all_scores.items():
+        if dataset not in ground_truth:
+            continue
+        print(f"  Dataset: {dataset}")
+        overlaps = []
+        for model, scores in model_scores.items():
+            if model not in ground_truth[dataset]:
+                continue
+            combined_value = scores.get("combined")
+            if combined_value is None:
+                continue
+            metric_parts = []
+            for metric in metric_names:
+                value = scores.get(metric)
+                if value is None:
+                    metric_parts.append(f"{metric}=N/A")
+                else:
+                    metric_parts.append(f"{metric}={value:.6f}")
+            overlaps.append(
+                (
+                    model,
+                    combined_value,
+                    ", ".join(metric_parts),
+                )
+            )
+        if not overlaps:
+            print("    (no overlapping models with ground truth)")
+            continue
+        for model, combined_value, metric_text in sorted(overlaps):
+            print(
+                f"    {model}: combined={combined_value:.6f} ({metric_text})"
+            )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Score models using Gabor features")
     parser.add_argument("--device", default="cpu", help="Device to run scoring on")
@@ -1395,6 +1441,7 @@ if __name__ == "__main__":
     combined_scores = normalize_and_combine_scores(
         raw_scores, metrics=selected_metrics, weights=weights, signs=signs
     )
+    report_combined_scores(combined_scores, ground_truth, selected_metrics)
     compute_kendall_tau_across_datasets(combined_scores, ground_truth)
 
     if args.benchmark:
