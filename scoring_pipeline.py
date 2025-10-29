@@ -458,6 +458,7 @@ def compute_msci_single_modality(
     label_column: str | None = "label",
     magnifications: Sequence[Any] | None = None,
     use_labels: bool = True,
+    allow_single_magnification: bool = False,
 ) -> MSCIResult:
     """Compute single-modality MSCI by comparing magnification means per region.
 
@@ -466,7 +467,10 @@ def compute_msci_single_modality(
     derived from the training split.  If labels are unavailable (for example
     when only raw embeddings are supplied) the metric falls back to using a
     region-wise centroid computed from all available magnifications so that MSCI
-    can still quantify cross-scale consistency.
+    can still quantify cross-scale consistency.  Set
+    ``allow_single_magnification`` to ``True`` to reuse the same formulation on
+    single-scale manifests by treating individual patch vectors as the samples
+    whose variance is measured against the region prototype.
     """
 
     if "embeddings" not in eval_features:
@@ -621,6 +625,8 @@ def compute_msci_single_modality(
             )
             use_label_prototypes = False
 
+    single_magnification_mode = False
+
     if magnifications is not None:
         requested: list[int] = []
         for mag in magnifications:
@@ -643,7 +649,10 @@ def compute_msci_single_modality(
         requested_set = set(requested)
 
     if len(requested_set) < 2:
-        raise ValueError("MSCI requires at least two magnification levels")
+        if allow_single_magnification and requested_set:
+            single_magnification_mode = True
+        else:
+            raise ValueError("MSCI requires at least two magnification levels")
 
     coverage_counts: Dict[int, int] = {mag: 0 for mag in requested_set}
     per_region_variances: list[float] = []
@@ -654,7 +663,7 @@ def compute_msci_single_modality(
 
     for region, info in region_embeddings.items():
         mag_dict = info.get("magnifications", {})
-        if magnifications is not None:
+        if magnifications is not None and not single_magnification_mode:
             for mag in requested_set:
                 if mag not in mag_dict:
                     coverage_counts[mag] += 1
@@ -663,8 +672,15 @@ def compute_msci_single_modality(
             mag for mag in sorted(mag_dict) if (not requested_set or mag in requested_set)
         ]
 
-        if len(available_for_region) < 2:
-            continue
+        if single_magnification_mode:
+            vectors = [
+                vec for mag in available_for_region for vec in mag_dict.get(mag, [])
+            ]
+            if not vectors:
+                continue
+        else:
+            if len(available_for_region) < 2:
+                continue
 
         prototype: torch.Tensor | None = None
         if use_label_prototypes and info.get("label") in label_prototypes:
@@ -683,16 +699,28 @@ def compute_msci_single_modality(
             continue
 
         sims: list[torch.Tensor] = []
-        for mag in available_for_region:
-            vectors = mag_dict[mag]
-            stacked = torch.stack(vectors, dim=0)
-            mean_vec = stacked.mean(dim=0)
-            norm = torch.norm(mean_vec)
-            if torch.isnan(norm) or float(norm.item()) == 0.0:
-                continue
-            normalised = mean_vec / norm
-            sims.append(torch.dot(normalised, prototype))
+        if single_magnification_mode:
+            for vector in vectors:
+                norm = torch.norm(vector)
+                if torch.isnan(norm) or float(norm.item()) == 0.0:
+                    continue
+                normalised = vector / norm
+                sims.append(torch.dot(normalised, prototype))
+        else:
+            for mag in available_for_region:
+                vectors_mag = mag_dict[mag]
+                stacked = torch.stack(vectors_mag, dim=0)
+                mean_vec = stacked.mean(dim=0)
+                norm = torch.norm(mean_vec)
+                if torch.isnan(norm) or float(norm.item()) == 0.0:
+                    continue
+                normalised = mean_vec / norm
+                sims.append(torch.dot(normalised, prototype))
 
+        if not sims:
+            continue
+        if single_magnification_mode and len(sims) == 1:
+            sims.append(sims[0])
         if len(sims) < 2:
             continue
 
@@ -720,7 +748,7 @@ def compute_msci_single_modality(
             missing_info
         )
 
-    if magnifications is not None:
+    if magnifications is not None and not single_magnification_mode:
         skipped = [mag for mag, count in coverage_counts.items() if count == regions_total]
         if skipped:
             warnings.warn(
@@ -803,6 +831,10 @@ def compute_gabor_scores_from_paths(
             msci_params["label_column"] = msci_config.get("label_column")
         if msci_config.get("magnifications") is not None:
             msci_params["magnifications"] = msci_config.get("magnifications")
+        if msci_config.get("allow_single_magnification") is not None:
+            msci_params["allow_single_magnification"] = _coerce_bool(
+                msci_config.get("allow_single_magnification")
+            )
 
         use_labels_value: Any | None = None
         if "use_labels" in msci_config and msci_config.get("use_labels") is not None:
@@ -931,6 +963,7 @@ def compute_gabor_scores_from_paths(
             label_column=label_column,
             magnifications=msci_params.get("magnifications"),
             use_labels=use_labels_flag,
+            allow_single_magnification=msci_params.get("allow_single_magnification", False),
         )
         scores["msci"] = result.score
         scores["msci_mean_variance"] = result.mean_variance

@@ -25,6 +25,7 @@ def build_5x_dataset_config() -> Dict[str, Dict[str, Any]]:
         "magnification_column": "patch_scale",
         "label_column": "label",
         "magnifications": [5],
+        "allow_single_magnification": True,
     }
     cam_msci_shared = {
         "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
@@ -32,6 +33,7 @@ def build_5x_dataset_config() -> Dict[str, Dict[str, Any]]:
         "magnification_column": "patch_scale",
         "label_column": "label",
         "magnifications": [5],
+        "allow_single_magnification": True,
     }
 
     return {
