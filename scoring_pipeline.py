@@ -1003,7 +1003,7 @@ def compute_scores_for_all_models(
 
 
 def compute_scores_for_all_datasets(
-    dataset_model_paths: Dict[str, Dict[str, Sequence[str]]], device: str = "cpu"
+    dataset_model_paths: Dict[str, Dict[str, Any]], device: str = "cpu"
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     dataset_results: Dict[str, Dict[str, Dict[str, float]]] = {}
     for dataset, model_paths in dataset_model_paths.items():
@@ -1280,10 +1280,85 @@ if __name__ == "__main__":
                     "magnifications": [5, 10, 20, 40],
                 },
             },
-        }
+        },
+        "CAM": {
+            "uni": {
+                "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/uni_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/uni_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                    "region_column": "patch_id",
+                    "magnification_column": "patch_scale",
+                    "label_column": "label",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "conch": {
+                "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/conch_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/conch_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                    "region_column": "patch_id",
+                    "magnification_column": "patch_scale",
+                    "label_column": "label",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "giga": {
+                "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/giga_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/giga_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                    "region_column": "patch_id",
+                    "magnification_column": "patch_scale",
+                    "label_column": "label",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "phikon": {
+                "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/phikon_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/phikon_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                    "region_column": "patch_id",
+                    "magnification_column": "patch_scale",
+                    "label_column": "label",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "virchow": {
+                "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/virchow_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/virchow_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                    "region_column": "patch_id",
+                    "magnification_column": "patch_scale",
+                    "label_column": "label",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+        },
     }
     raw_scores = compute_scores_for_all_datasets(dataset_model_paths, device=args.device)
-    ground_truth = {"TCGA": {"uni": 0.94}}
+    ground_truth_tcga = {
+        "TCGA": {
+            "uni": 0.4856,
+            "conch": 0.4916,
+            "giga": 0.5108,
+            "phikon": 0.4675,
+            "virchow": 0.4952,
+        }
+    }
+    ground_truth_cam = {
+        "CAM": {
+            "uni": 0.7656,
+            "conch": 0.7903,
+            "giga": 0.8567,
+            "phikon": 0.8235,
+            "virchow": 0.8698,
+        }
+    }
+    ground_truth = {**ground_truth_tcga, **ground_truth_cam}
     selected_metrics = _validate_metric_selection(args.combine_metrics)
     weights, signs = derive_optimal_weights(
         raw_scores, ground_truth, metrics=selected_metrics
