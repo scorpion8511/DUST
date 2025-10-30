@@ -1284,6 +1284,92 @@ def compute_kendall_tau_across_datasets(
     return taus
 
 
+def compute_topk_probabilities(
+    all_scores: Dict[str, Dict[str, Dict[str, float]]],
+    ground_truth: Dict[str, Dict[str, float]],
+    *,
+    combined_key: str = "combined",
+    ks: Sequence[int] = (1, 2, 3),
+) -> tuple[Dict[str, Dict[int, float]], Dict[int, float]]:
+    """Return per-dataset and aggregate :math:`Pr(\text{top-}k)` statistics.
+
+    For every dataset that overlaps with ``ground_truth`` this helper ranks
+    models by the specified ``combined_key`` score and checks whether the
+    highest-accuracy ground-truth model appears within the top ``k`` slots of
+    the estimated ranking.  The returned probability is therefore ``1`` when
+    the best reference model is retrieved within the top ``k`` predictions and
+    ``0`` otherwise.  Aggregate values are the mean over all participating
+    datasets for each ``k``.
+    """
+
+    ks = tuple(sorted({int(k) for k in ks if k > 0}))
+    dataset_probs: Dict[str, Dict[int, float]] = {}
+    aggregate: Dict[int, list[float]] = {k: [] for k in ks}
+
+    for dataset, model_scores in all_scores.items():
+        gt = ground_truth.get(dataset)
+        if not gt:
+            continue
+        filtered: list[tuple[str, float]] = []
+        for model, scores in model_scores.items():
+            if model not in gt:
+                continue
+            combined_val = scores.get(combined_key)
+            if combined_val is None:
+                continue
+            filtered.append((model, float(combined_val)))
+        if not filtered:
+            continue
+        # Restrict the ground truth table to overlapping models only.
+        gt_subset = {model: gt[model] for model, _ in filtered}
+        max_acc = max(gt_subset.values())
+        top_models = {
+            model for model, acc in gt_subset.items() if np.isclose(acc, max_acc)
+        }
+        if not top_models:
+            continue
+        ordered = sorted(filtered, key=lambda item: (-item[1], item[0]))
+        probs_for_dataset: Dict[int, float] = {}
+        for k in ks:
+            if k <= 0:
+                continue
+            topk_models = {model for model, _ in ordered[:k]}
+            hit = float(bool(top_models & topk_models))
+            probs_for_dataset[k] = hit
+            aggregate[k].append(hit)
+        if probs_for_dataset:
+            dataset_probs[dataset] = probs_for_dataset
+
+    global_probs = {
+        k: float(np.mean(values)) for k, values in aggregate.items() if values
+    }
+    return dataset_probs, global_probs
+
+
+def report_topk_probabilities(
+    dataset_probs: Dict[str, Dict[int, float]],
+    global_probs: Dict[int, float],
+    metric_names: Sequence[str],
+) -> None:
+    """Display :math:`Pr(\text{top-}k)` results for the combined ranking."""
+
+    label = ", ".join(metric_names)
+    print(f"Pr(topk) for metrics {label} used in combined ranking:")
+    if not dataset_probs:
+        print("  (no datasets with overlapping models)")
+    else:
+        for dataset in sorted(dataset_probs):
+            components = ", ".join(
+                f"top{k}={prob:.3f}" for k, prob in sorted(dataset_probs[dataset].items())
+            )
+            print(f"  {dataset}: {components}")
+    if global_probs:
+        components = ", ".join(
+            f"top{k}={prob:.3f}" for k, prob in sorted(global_probs.items())
+        )
+        print(f"  Aggregate mean: {components}")
+
+
 def report_combined_scores(
     all_scores: Dict[str, Dict[str, Dict[str, float]]],
     ground_truth: Dict[str, Dict[str, float]],
@@ -1491,6 +1577,10 @@ if __name__ == "__main__":
         raw_scores, metrics=selected_metrics, weights=weights, signs=signs
     )
     report_combined_scores(combined_scores, ground_truth, selected_metrics)
+    dataset_topk, global_topk = compute_topk_probabilities(
+        combined_scores, ground_truth
+    )
+    report_topk_probabilities(dataset_topk, global_topk, selected_metrics)
     compute_kendall_tau_across_datasets(combined_scores, ground_truth)
 
     if args.benchmark:

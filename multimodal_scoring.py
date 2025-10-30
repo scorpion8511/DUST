@@ -506,6 +506,82 @@ def _compute_weighted_kendall_tau(
     return float(tau)
 
 
+def _compute_topk_probabilities(
+    dataset_scores: Dict[str, Dict[str, Dict[str, float]]],
+    ground_truth: Dict[str, Dict[str, float]],
+    *,
+    combined_key: str,
+    ks: Sequence[int] = (1, 2, 3),
+) -> tuple[Dict[str, Dict[int, float]], Dict[int, float]]:
+    """Evaluate :math:`Pr(\text{top-}k)` for each dataset and aggregate mean."""
+
+    ks = tuple(sorted({int(k) for k in ks if k > 0}))
+    dataset_probs: Dict[str, Dict[int, float]] = {}
+    aggregate: Dict[int, list[float]] = {k: [] for k in ks}
+
+    for dataset, model_scores in dataset_scores.items():
+        gt = ground_truth.get(dataset)
+        if not gt:
+            continue
+        filtered: list[tuple[str, float]] = []
+        for model, scores in model_scores.items():
+            if model not in gt:
+                continue
+            combined_val = scores.get(combined_key)
+            if combined_val is None:
+                continue
+            filtered.append((model, float(combined_val)))
+        if not filtered:
+            continue
+
+        gt_subset = {model: gt[model] for model, _ in filtered}
+        max_acc = max(gt_subset.values())
+        top_models = {
+            model for model, acc in gt_subset.items() if np.isclose(acc, max_acc)
+        }
+        if not top_models:
+            continue
+
+        ordered = sorted(filtered, key=lambda item: (-item[1], item[0]))
+        dataset_result: Dict[int, float] = {}
+        for k in ks:
+            topk_models = {model for model, _ in ordered[:k]}
+            hit = float(bool(top_models & topk_models))
+            dataset_result[k] = hit
+            aggregate[k].append(hit)
+        if dataset_result:
+            dataset_probs[dataset] = dataset_result
+
+    global_probs = {
+        k: float(np.mean(values)) for k, values in aggregate.items() if values
+    }
+    return dataset_probs, global_probs
+
+
+def _report_topk_probabilities(
+    dataset_probs: Dict[str, Dict[int, float]],
+    global_probs: Dict[int, float],
+    *,
+    descriptor: str,
+) -> None:
+    """Print :math:`Pr(\text{top-}k)` summaries for the combined ranking."""
+
+    print(f"Pr(topk) for {descriptor} ranking:")
+    if not dataset_probs:
+        print("  (no datasets with overlapping models)")
+    else:
+        for dataset in sorted(dataset_probs):
+            parts = ", ".join(
+                f"top{k}={prob:.3f}" for k, prob in sorted(dataset_probs[dataset].items())
+            )
+            print(f"  {dataset}: {parts}")
+    if global_probs:
+        parts = ", ".join(
+            f"top{k}={prob:.3f}" for k, prob in sorted(global_probs.items())
+        )
+        print(f"  Aggregate mean: {parts}")
+
+
 def _load_ground_truth(path: Optional[str]) -> Dict[str, Dict[str, float]]:
     if path is None:
         return DEFAULT_GROUND_TRUTH
@@ -847,6 +923,21 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                         combined_label
                     ] = float(value)
                     print(f"  {name}: {value:.6f}")
+
+        if joint_optimisation is not None:
+            descriptor = (
+                "global combined" if multi_dataset else "combined"
+            )
+            topk_dataset, topk_global = _compute_topk_probabilities(
+                collected_scores,
+                dataset_truths,
+                combined_key=combined_label,
+            )
+            _report_topk_probabilities(
+                topk_dataset,
+                topk_global,
+                descriptor=descriptor,
+            )
 
         for dataset in requested_datasets:
             gt = ground_truth.get(dataset)
