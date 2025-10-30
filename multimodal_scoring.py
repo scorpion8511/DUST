@@ -314,11 +314,17 @@ def compute_msci(
 
     sim_tensor = torch.stack(similarities, dim=-1)
     if single_magnification:
-        # Duplicate the single available magnification so the variance is
-        # evaluated against the theoretical two-sample bound instead of
-        # collapsing to zero. This mirrors the unimodal pipeline's fallback
-        # where single-scale manifests are compared against a shared prototype.
-        sim_tensor = torch.cat([sim_tensor, sim_tensor], dim=-1)
+        # When only a single magnification is supplied we cannot measure
+        # cross-scale variance directly.  Instead of duplicating the column –
+        # which would always yield zero variance – compare every similarity
+        # value against the dataset-wide prototype obtained from the mean
+        # similarity.  This mirrors the single-scale fallback in the
+        # unimodal scoring pipeline where each patch is contrasted with the
+        # region centroid.
+        base = sim_tensor.squeeze(-1)
+        global_mean = base.mean()
+        reference = torch.full_like(base, global_mean)
+        sim_tensor = torch.stack([base, reference], dim=-1)
     mean_sim = sim_tensor.mean(dim=-1, keepdim=True)
     variance = torch.mean((sim_tensor - mean_sim) ** 2, dim=-1)
     mean_variance = variance.mean().item()
