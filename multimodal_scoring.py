@@ -476,7 +476,25 @@ def _summarise_for_json(msci_result: MSCIResult, cmi_results: Dict[int, CMILBRes
 def _compute_weighted_kendall_tau(
     scores: Dict[str, float], ground_truth: Dict[str, float]
 ) -> Optional[float]:
-    """Compute weighted Kendall tau between predictions and ground truth."""
+    r"""Compute the weighted Kendall :math:`\tau_w` correlation.
+
+    The implementation delegates to :func:`scipy.stats.weightedtau`, which
+    follows the formulation introduced by Shieh (1998).  Given paired score
+    vectors :math:`x` and :math:`y`, every observation carries a weight
+    :math:`w_i` (unity in this pipeline) and every pair :math:`(i, j)` with
+    :math:`i < j` receives the product :math:`w_i w_j`.  The statistic is
+    expressed as
+
+    .. math::
+
+        \tau_w = \frac{P - Q}{\sqrt{(P + Q + T)(P + Q + U)}} ,
+
+    where :math:`P` and :math:`Q` accumulate the weighted counts of concordant
+    and discordant pairs respectively, :math:`T` accounts for pairs tied only in
+    :math:`x`, and :math:`U` accounts for pairs tied only in :math:`y`.  When no
+    overlap exists between the prediction and ground-truth keys the function
+    returns ``None``.
+    """
 
     overlap = [name for name in scores if name in ground_truth]
     if len(overlap) < 2:

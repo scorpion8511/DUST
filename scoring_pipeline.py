@@ -1247,6 +1247,22 @@ def derive_optimal_weights(
 def compute_weighted_kendall_tau(
     scores: Dict[str, float], ground_truth: Dict[str, float]
 ) -> float:
+    r"""Return the weighted Kendall :math:`\tau_w` correlation for ``scores``.
+
+    This function is a thin wrapper around :func:`scipy.stats.weightedtau`,
+    which implements the Shieh (1998) formulation.  With score vectors
+    :math:`x` and :math:`y`, observation weights :math:`w_i` (unity in our
+    usage), and pairwise weights :math:`w_i w_j`, the statistic is computed as
+
+    .. math::
+
+        \tau_w = \frac{P - Q}{\sqrt{(P + Q + T)(P + Q + U)}} ,
+
+    where :math:`P` and :math:`Q` summarise the weighted counts of concordant
+    and discordant pairs, :math:`T` represents ties exclusive to :math:`x`, and
+    :math:`U` represents ties exclusive to :math:`y`.
+    """
+
     common = [m for m in scores if m in ground_truth]
     pred = [scores[m] for m in common]
     truth = [ground_truth[m] for m in common]
