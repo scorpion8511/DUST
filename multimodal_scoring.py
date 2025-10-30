@@ -298,6 +298,8 @@ def compute_msci(
     if not mags:
         raise ValueError("At least one magnification is required to compute MSCI.")
 
+    single_magnification = len(mags) == 1
+
     text_norm = F.normalize(text_embeddings, dim=-1)
     similarities = []
     for mag in mags:
@@ -311,11 +313,17 @@ def compute_msci(
         similarities.append(torch.sum(img * text_norm, dim=-1))
 
     sim_tensor = torch.stack(similarities, dim=-1)
+    if single_magnification:
+        # Duplicate the single available magnification so the variance is
+        # evaluated against the theoretical two-sample bound instead of
+        # collapsing to zero. This mirrors the unimodal pipeline's fallback
+        # where single-scale manifests are compared against a shared prototype.
+        sim_tensor = torch.cat([sim_tensor, sim_tensor], dim=-1)
     mean_sim = sim_tensor.mean(dim=-1, keepdim=True)
     variance = torch.mean((sim_tensor - mean_sim) ** 2, dim=-1)
     mean_variance = variance.mean().item()
 
-    max_var = _max_variance(len(mags))
+    max_var = _max_variance(sim_tensor.shape[-1])
     if max_var <= 0:
         msci_score = 0.0
     else:
