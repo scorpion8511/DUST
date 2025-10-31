@@ -202,6 +202,33 @@ def _build_sample_token_index(samples: Sequence[Sample]) -> Dict[str, List[int]]
     return token_map
 
 
+def _select_consistent_candidates(
+    candidate_indices: Iterable[int], samples: Sequence[Sample]
+) -> Tuple[List[int], Optional[int]]:
+    """Return sample indices sharing a single label, otherwise an empty list.
+
+    The alignment metadata for some cached feature sets only records a partial
+    identifier (e.g. just the patch identifier without the slide component).
+    When we fall back to token based matching we may encounter several manifest
+    rows that share the same token but correspond to different slides or even
+    different labels.  Instead of propagating the ambiguity, we only accept
+    matches where every candidate sample agrees on the label.  The caller can
+    then decide whether to reuse the group or keep searching for a less
+    ambiguous token.
+    """
+
+    indices: List[int] = []
+    label_value: Optional[int] = None
+    for idx in candidate_indices:
+        sample_label = samples[idx].label
+        if label_value is None:
+            label_value = sample_label
+        elif sample_label != label_value:
+            return [], None
+        indices.append(idx)
+    return indices, label_value
+
+
 def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedFeatureSet) -> None:
     if features.features.shape[0] == len(samples):
         return
@@ -244,6 +271,8 @@ def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedF
             identifier_index.setdefault(token, []).append(idx)
     unmatched_samples = {idx for idx in range(len(samples)) if samples[idx].feature_index is None}
 
+    feature_label_constraints: Dict[int, int] = {}
+
     for feature_idx, region_id in enumerate(region_ids):
         if not unmatched_samples:
             break
@@ -256,21 +285,62 @@ def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedF
         for raw_id in raw_ids:
             identifier_tokens = _normalise_identifier_tokens(raw_id, allow_partial=False)
             for token in identifier_tokens:
-                for sample_idx in identifier_index.get(token, []):
-                    if sample_idx not in unmatched_samples:
-                        continue
+                if feature_idx in feature_label_constraints:
+                    expected_label = feature_label_constraints[feature_idx]
+                else:
+                    expected_label = None
+                raw_candidates = [
+                    idx
+                    for idx in identifier_index.get(token, [])
+                    if idx in unmatched_samples
+                ]
+                candidates, label_value = _select_consistent_candidates(
+                    raw_candidates, samples
+                )
+                if not candidates:
+                    continue
+                if expected_label is not None and label_value is not None and label_value != expected_label:
+                    continue
+                for sample_idx in candidates:
                     samples[sample_idx].feature_index = feature_idx
                     unmatched_samples.remove(sample_idx)
-                    matched = True
+                if label_value is not None:
+                    feature_label_constraints[feature_idx] = label_value
+                matched = True
             if matched:
                 break
             for token in _normalise_identifier_tokens(raw_id):
-                for sample_idx in token_index.get(token, []):
-                    if sample_idx not in unmatched_samples:
-                        continue
+                if feature_idx in feature_label_constraints:
+                    expected_label = feature_label_constraints[feature_idx]
+                else:
+                    expected_label = None
+                raw_candidates = [
+                    idx for idx in token_index.get(token, []) if idx in unmatched_samples
+                ]
+                if not raw_candidates:
+                    continue
+                # Require every candidate reached via a fuzzy token to share the
+                # same manifest identifier.  This prevents short tokens such as
+                # "patch_1" from aligning samples that originate from different
+                # slides.
+                identifiers = {
+                    samples[idx].identifier for idx in raw_candidates if samples[idx].identifier
+                }
+                if len(identifiers) > 1:
+                    continue
+                candidates, label_value = _select_consistent_candidates(
+                    raw_candidates, samples
+                )
+                if not candidates:
+                    continue
+                if expected_label is not None and label_value is not None and label_value != expected_label:
+                    continue
+                for sample_idx in candidates:
                     samples[sample_idx].feature_index = feature_idx
                     unmatched_samples.remove(sample_idx)
-                    matched = True
+                if label_value is not None:
+                    feature_label_constraints[feature_idx] = label_value
+                matched = True
         if matched:
             continue
 
