@@ -105,6 +105,20 @@ def _strip_magnification_suffixes(identifier: str) -> str:
     return "_".join(base_parts)
 
 
+def _maybe_split_token(candidate: str, separator: str) -> List[str]:
+    if separator not in candidate:
+        return []
+    parts = [part for part in candidate.split(separator) if part]
+    collapsed = "".join(parts)
+    variants = parts[:]
+    if collapsed:
+        variants.append(collapsed)
+    joined = "_".join(parts)
+    if joined:
+        variants.append(joined)
+    return variants
+
+
 def _normalise_identifier_tokens(value: Optional[object]) -> List[str]:
     if value is None:
         return []
@@ -153,6 +167,11 @@ def _normalise_identifier_tokens(value: Optional[object]) -> List[str]:
         lowered = candidate.lower()
         if lowered not in seen:
             queue.append(lowered)
+
+        for separator in ("::", "|", "-", ":"):
+            for variant in _maybe_split_token(candidate, separator):
+                if variant not in seen:
+                    queue.append(variant)
 
     return tokens
 
@@ -312,6 +331,20 @@ def _maybe_login(token: Optional[str]) -> None:
         raise RuntimeError("Failed to authenticate with Hugging Face.") from exc
 
 
+def _combine_identifier(row: Mapping[str, str], columns: Sequence[str]) -> Optional[str]:
+    parts: List[str] = []
+    for column in columns:
+        value = row.get(column)
+        if value is None:
+            continue
+        token = str(value).strip()
+        if token:
+            parts.append(token)
+    if not parts:
+        return None
+    return "::".join(parts)
+
+
 def read_manifest(
     csv_path: str,
     image_root: Optional[str],
@@ -323,6 +356,7 @@ def read_manifest(
     filter_values: Optional[Sequence[str]],
     *,
     verify_images: bool = True,
+    composite_id_columns: Optional[Sequence[str]] = None,
 ) -> Tuple[List[Sample], Dict[int, str]]:
     """Parse the manifest CSV and return typed samples plus the label map.
 
@@ -340,8 +374,37 @@ def read_manifest(
             raise ValueError("CSV must contain a class label column")
         if filter_column is not None and filter_column not in reader.fieldnames:
             raise ValueError(f"Unknown filter column: {filter_column}")
+        if id_column and composite_id_columns:
+            raise ValueError("--id-column and --id-columns cannot be used together")
+
         if id_column is not None and id_column not in reader.fieldnames:
             raise ValueError(f"Unknown id column: {id_column}")
+
+        if composite_id_columns:
+            missing = [column for column in composite_id_columns if column not in reader.fieldnames]
+            if missing:
+                raise ValueError(
+                    "Unknown id columns for composite identifier: "
+                    + ", ".join(missing)
+                )
+
+        auto_composite: Optional[Tuple[str, str]] = None
+        if not id_column and not composite_id_columns:
+            candidate_pairs: Sequence[Tuple[str, str]] = (
+                ("slide", "patch"),
+                ("slide_id", "patch_id"),
+                ("slide", "patch_id"),
+                ("slide_id", "patch"),
+            )
+            for first, second in candidate_pairs:
+                if first in reader.fieldnames and second in reader.fieldnames:
+                    auto_composite = (first, second)
+                    break
+            if auto_composite:
+                print(
+                    "No --id-column supplied; combining columns "
+                    f"{auto_composite[0]!r} and {auto_composite[1]!r} to build unique identifiers."
+                )
 
         for row in reader:
             if filter_column and filter_values and row.get(filter_column) not in filter_values:
@@ -357,7 +420,13 @@ def read_manifest(
             if label_name not in label_to_index:
                 label_to_index[label_name] = len(label_to_index)
             label_idx = label_to_index[label_name]
-            identifier = row[id_column].strip() if id_column else None
+            identifier: Optional[str] = None
+            if composite_id_columns:
+                identifier = _combine_identifier(row, composite_id_columns)
+            elif id_column:
+                identifier = row[id_column].strip()
+            elif auto_composite:
+                identifier = _combine_identifier(row, auto_composite)
             if identifier == "":
                 identifier = None
             samples.append(
@@ -910,6 +979,15 @@ def main() -> None:
             "Optional CSV column whose values align with identifiers stored in precomputed feature metadata."
         ),
     )
+    parser.add_argument(
+        "--id-columns",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of CSV columns whose values are concatenated to form unique identifiers when aligning"
+            " precomputed features (for example: --id-columns slide_id patch_id)."
+        ),
+    )
     parser.add_argument("--filter-column", type=str, default=None, help="Optional column used to filter rows")
     parser.add_argument("--filter-values", nargs="*", default=None, help="Values from --filter-column to keep")
     parser.add_argument("--batch-size", type=int, default=32)
@@ -1003,6 +1081,7 @@ def main() -> None:
         filter_column=args.filter_column,
         filter_values=args.filter_values,
         verify_images=args.features is None,
+        composite_id_columns=args.id_columns,
     )
 
     precomputed: Optional[PrecomputedFeatureSet] = None
