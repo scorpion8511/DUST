@@ -79,7 +79,21 @@ DEFAULT_GROUND_TRUTH: Dict[str, Dict[str, float]] = {
         "musk": 0.65,
         "conch": 0.58,
         "pathgen": 0.60,
-    }
+    },
+    "CAM": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
+    "BACH": {
+        "plip": 0.8650,
+        "musk": 0.9817,
+        "conch": 0.9138,
+        "pathgen": 0.9433,
+        "biomed": 0.8216,
+    },
 }
 
 
@@ -89,7 +103,21 @@ DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, str]] = {
         "musk": "/home/jovyan/work/tran_est/MUST/features/musk_features02.pth",
         "conch": "/home/jovyan/work/tran_est/MUST/features/conch_features02.pth",
         "pathgen": "/home/jovyan/work/tran_est/MUST/features/pathgen_features02.pth",
-    }
+    },
+    "CAM": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_cam/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_cam/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_cam/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_cam/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_cam/biomed_features.pth",
+    },
+    "BACH": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_bach/plip_features03.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_bach/musk_features03.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_bach/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_bach/pathgen_features03.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_bach/biomed_features03.pth",
+    },
 }
 
 
@@ -947,6 +975,90 @@ def _kendall_tau_per_metric(metric_scores: Mapping[str, Mapping[str, float]], gr
     return tau_results
 
 
+def _topk_hits(
+    scores: Mapping[str, float],
+    ground_truth: Mapping[str, float],
+    *,
+    ks: Sequence[int] = (1, 2, 3),
+) -> Dict[int, float]:
+    if not scores or not ground_truth:
+        return {}
+
+    filtered = {model: scores[model] for model in scores if model in ground_truth}
+    if not filtered:
+        return {}
+
+    gt_subset = {model: ground_truth[model] for model in filtered}
+    max_acc = max(gt_subset.values())
+    top_models = {
+        model for model, acc in gt_subset.items() if np.isclose(acc, max_acc)
+    }
+    if not top_models:
+        return {}
+
+    ordered = sorted(filtered.items(), key=lambda item: (-item[1], item[0]))
+    hits: Dict[int, float] = {}
+    for k in ks:
+        if k <= 0:
+            continue
+        topk_models = {model for model, _ in ordered[:k]}
+        hits[int(k)] = float(bool(top_models & topk_models))
+    return hits
+
+
+def _topk_probabilities_per_metric(
+    metric_scores: Mapping[str, Mapping[str, float]],
+    ground_truth: Mapping[str, float],
+    *,
+    ks: Sequence[int] = (1, 2, 3),
+) -> Dict[str, Dict[int, float]]:
+    results: Dict[str, Dict[int, float]] = {}
+    for metric, scores in metric_scores.items():
+        hits = _topk_hits(scores, ground_truth, ks=ks)
+        if hits:
+            results[metric] = hits
+    return results
+
+
+def _aggregate_topk_probabilities(
+    per_dataset: Mapping[str, Mapping[str, Dict[int, float]]]
+) -> Dict[str, Dict[int, float]]:
+    aggregates: Dict[str, Dict[int, List[float]]] = {}
+    for dataset_scores in per_dataset.values():
+        for metric, topk_hits in dataset_scores.items():
+            for k, value in topk_hits.items():
+                aggregates.setdefault(metric, {}).setdefault(k, []).append(float(value))
+
+    return {
+        metric: {
+            int(k): float(np.mean(values)) for k, values in hits.items() if values
+        }
+        for metric, hits in aggregates.items()
+    }
+
+
+def _aggregate_tau_statistics(
+    per_dataset: Mapping[str, Mapping[str, float]]
+) -> Dict[str, Dict[str, float]]:
+    aggregates: Dict[str, List[float]] = {}
+    for dataset_scores in per_dataset.values():
+        for metric, value in dataset_scores.items():
+            if math.isnan(value):
+                continue
+            aggregates.setdefault(metric, []).append(float(value))
+
+    summary: Dict[str, Dict[str, float]] = {}
+    for metric, values in aggregates.items():
+        if not values:
+            continue
+        summary[metric] = {
+            "mean": float(np.mean(values)),
+            "min": float(np.min(values)),
+            "max": float(np.max(values)),
+        }
+    return summary
+
+
 def _magnification_sort_key(key: str) -> Tuple[int, object]:
     match = re.search(r"image_(\d+)x", key)
     if match:
@@ -1029,15 +1141,25 @@ def evaluate_single_dataset(
             metric_scores.setdefault(metric_name, {})[model_name] = float(value)
 
     tau_scores = _kendall_tau_per_metric(metric_scores, ground_truth)
+    topk_scores = _topk_probabilities_per_metric(metric_scores, ground_truth)
 
     if tau_scores:
         print(f"\nKendall tau against ground truth ({dataset}):")
         for metric_name, tau in tau_scores.items():
             print(f"  {metric_name}: {tau}")
 
+    if topk_scores:
+        print(f"\nPr(topk) against ground truth ({dataset}):")
+        for metric_name, hits in topk_scores.items():
+            parts = ", ".join(
+                f"top{k}={value:.3f}" for k, value in sorted(hits.items())
+            )
+            print(f"  {metric_name}: {parts}")
+
     return {
         "models": raw_results,
         "tau": tau_scores,
+        "topk": topk_scores,
         "ground_truth": ground_truth,
     }
 
@@ -1127,6 +1249,13 @@ def evaluate_multimodal_dataset(
     for magnification_key, metrics_map in magnification_metric_scores.items():
         tau_by_magnification[magnification_key] = _kendall_tau_per_metric(metrics_map, ground_truth)
 
+    topk_scores = _topk_probabilities_per_metric(metric_scores, ground_truth)
+    topk_by_magnification: Dict[str, Dict[str, Dict[int, float]]] = {}
+    for magnification_key, metrics_map in magnification_metric_scores.items():
+        hits = _topk_probabilities_per_metric(metrics_map, ground_truth)
+        if hits:
+            topk_by_magnification[magnification_key] = hits
+
     if tau_scores:
         print(f"\nKendall tau against ground truth ({dataset}):")
         for metric_name, tau in tau_scores.items():
@@ -1140,12 +1269,97 @@ def evaluate_multimodal_dataset(
             for metric_name, tau in per_metric.items():
                 print(f"    {metric_name}: {tau}")
 
+    if topk_scores:
+        print(f"\nPr(topk) against ground truth ({dataset}):")
+        for metric_name, hits in topk_scores.items():
+            parts = ", ".join(
+                f"top{k}={value:.3f}" for k, value in sorted(hits.items())
+            )
+            print(f"  {metric_name}: {parts}")
+
+    if topk_by_magnification:
+        print(f"\nPr(topk) by magnification ({dataset}):")
+        for magnification_key in sorted(topk_by_magnification, key=_magnification_sort_key):
+            per_metric = topk_by_magnification[magnification_key]
+            print(f"  {magnification_key}:")
+            for metric_name, hits in per_metric.items():
+                parts = ", ".join(
+                    f"top{k}={value:.3f}" for k, value in sorted(hits.items())
+                )
+                print(f"    {metric_name}: {parts}")
+
     return {
         "models": raw_outputs,
         "aggregated": aggregated_scores,
         "tau": tau_scores,
         "tau_by_magnification": tau_by_magnification,
+        "topk": topk_scores,
+        "topk_by_magnification": topk_by_magnification,
+        "metric_scores": metric_scores,
         "ground_truth": ground_truth,
+    }
+
+
+def evaluate_all_multimodal_datasets(
+    metrics: Sequence[str],
+    *,
+    gaussian_type: str,
+    emms_backend: Optional[str],
+    emms_model: Optional[str],
+    manifest: Optional[str] = None,
+    label_column: str = "subtype",
+    region_column: str = "patch_id",
+    magnification_column: str = "patch_scale",
+    device: torch.device,
+    iimm_batch_size: int,
+) -> Dict[str, object]:
+    dataset_results: Dict[str, Dict[str, object]] = {}
+    per_dataset_tau: Dict[str, Dict[str, float]] = {}
+    per_dataset_topk: Dict[str, Dict[str, Dict[int, float]]] = {}
+    per_dataset_metric_scores: Dict[str, Dict[str, Mapping[str, float]]] = {}
+
+    for dataset in sorted(DEFAULT_DATASET_MODEL_PATHS):
+        result = evaluate_multimodal_dataset(
+            dataset,
+            metrics,
+            gaussian_type=gaussian_type,
+            emms_backend=emms_backend,
+            emms_model=emms_model,
+            manifest=manifest,
+            label_column=label_column,
+            region_column=region_column,
+            magnification_column=magnification_column,
+            device=device,
+            iimm_batch_size=iimm_batch_size,
+        )
+        dataset_results[dataset] = result
+        per_dataset_tau[dataset] = result.get("tau", {})
+        per_dataset_topk[dataset] = result.get("topk", {})
+        per_dataset_metric_scores[dataset] = result.get("metric_scores", {})
+
+    aggregate_tau = _aggregate_tau_statistics(per_dataset_tau)
+    aggregate_topk = _aggregate_topk_probabilities(per_dataset_topk)
+
+    if aggregate_tau:
+        print("\n=== Aggregate Kendall tau across datasets ===")
+        for metric_name, stats in aggregate_tau.items():
+            print(
+                f"  {metric_name}: mean={stats['mean']:.3f}, min={stats['min']:.3f}, max={stats['max']:.3f}"
+            )
+
+    if aggregate_topk:
+        print("\n=== Aggregate Pr(topk) across datasets ===")
+        for metric_name, hits in aggregate_topk.items():
+            parts = ", ".join(
+                f"top{k}={value:.3f}" for k, value in sorted(hits.items())
+            )
+            print(f"  {metric_name}: {parts}")
+
+    return {
+        "datasets": dataset_results,
+        "aggregate_tau": aggregate_tau,
+        "aggregate_topk": aggregate_topk,
+        "metric_scores": per_dataset_metric_scores,
     }
 
 
@@ -1333,7 +1547,13 @@ def build_argparser() -> argparse.ArgumentParser:
     single_dataset.add_argument("--dataset", type=str, default="TCGA", choices=sorted(DEFAULT_SINGLE_DATASET_MODEL_PATHS.keys()), help="Dataset key to evaluate")
 
     multi_dataset = subparsers.add_parser("multi-dataset", parents=[dataset_common], help="Evaluate all multimodal models for a dataset")
-    multi_dataset.add_argument("--dataset", type=str, default="TCGA", choices=sorted(DEFAULT_DATASET_MODEL_PATHS.keys()), help="Dataset key to evaluate")
+    multi_dataset.add_argument(
+        "--dataset",
+        type=str,
+        default="TCGA",
+        choices=sorted(list(DEFAULT_DATASET_MODEL_PATHS.keys()) + ["ALL"]),
+        help="Dataset key to evaluate or 'ALL' for every dataset",
+    )
 
     return parser
 
@@ -1384,15 +1604,39 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
         return results
 
     if args.mode == "multi-dataset":
-        results = evaluate_multimodal_dataset(
-            args.dataset,
-            metrics,
-            gaussian_type=args.gaussian_type,
-            emms_backend=args.emms_backend,
-            emms_model=args.emms_model,
-            device=device,
-            iimm_batch_size=iimm_batch_size,
-        )
+        dataset_key = args.dataset or "TCGA"
+        manifest = getattr(args, "manifest", None)
+        label_column = getattr(args, "label_column", "subtype")
+        region_column = getattr(args, "region_column", "patch_id")
+        magnification_column = getattr(args, "magnification_column", "patch_scale")
+
+        if dataset_key.upper() == "ALL":
+            results = evaluate_all_multimodal_datasets(
+                metrics,
+                gaussian_type=args.gaussian_type,
+                emms_backend=args.emms_backend,
+                emms_model=args.emms_model,
+                manifest=manifest,
+                label_column=label_column,
+                region_column=region_column,
+                magnification_column=magnification_column,
+                device=device,
+                iimm_batch_size=iimm_batch_size,
+            )
+        else:
+            results = evaluate_multimodal_dataset(
+                dataset_key,
+                metrics,
+                gaussian_type=args.gaussian_type,
+                emms_backend=args.emms_backend,
+                emms_model=args.emms_model,
+                manifest=manifest,
+                label_column=label_column,
+                region_column=region_column,
+                magnification_column=magnification_column,
+                device=device,
+                iimm_batch_size=iimm_batch_size,
+            )
         if args.json:
             _write_json(args.json, results)
         return results
