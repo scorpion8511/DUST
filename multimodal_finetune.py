@@ -173,6 +173,13 @@ def _normalise_identifier_tokens(
             colon_slash = candidate.replace("::", "/")
             if colon_slash and colon_slash not in seen:
                 queue.append(colon_slash)
+            first, _, remainder = candidate.partition("::")
+            if remainder:
+                root_first, ext_first = os.path.splitext(first)
+                if ext_first and root_first:
+                    alt = f"{root_first}::{remainder}"
+                    if alt not in seen:
+                        queue.append(alt)
 
         root, ext = os.path.splitext(candidate)
         if ext and root and root not in seen:
@@ -216,27 +223,42 @@ def _build_sample_token_index(samples: Sequence[Sample]) -> Dict[str, List[int]]
 def _select_consistent_candidates(
     candidate_indices: Iterable[int], samples: Sequence[Sample]
 ) -> Tuple[List[int], Optional[int]]:
-    """Return sample indices sharing a single label, otherwise an empty list.
+    """Return sample indices sharing label and provenance information.
 
     The alignment metadata for some cached feature sets only records a partial
     identifier (e.g. just the patch identifier without the slide component).
     When we fall back to token based matching we may encounter several manifest
     rows that share the same token but correspond to different slides or even
     different labels.  Instead of propagating the ambiguity, we only accept
-    matches where every candidate sample agrees on the label.  The caller can
-    then decide whether to reuse the group or keep searching for a less
-    ambiguous token.
+    matches where every candidate sample agrees on the label and refers to the
+    same underlying asset (identifier and CSV image column when available).
     """
 
     indices: List[int] = []
     label_value: Optional[int] = None
+    identifiers: Set[str] = set()
+    csv_entries: Set[str] = set()
+
     for idx in candidate_indices:
-        sample_label = samples[idx].label
+        sample = samples[idx]
+        sample_label = sample.label
         if label_value is None:
             label_value = sample_label
         elif sample_label != label_value:
             return [], None
+
+        if sample.identifier:
+            identifiers.add(sample.identifier)
+            if len(identifiers) > 1:
+                return [], None
+
+        if sample.csv_image:
+            csv_entries.add(sample.csv_image)
+            if len(csv_entries) > 1:
+                return [], None
+
         indices.append(idx)
+
     return indices, label_value
 
 
@@ -462,6 +484,29 @@ def _maybe_login(token: Optional[str]) -> None:
 
 
 def _combine_identifier(row: Mapping[str, str], columns: Sequence[str]) -> Optional[str]:
+    def _normalise_part(token: str, column: str) -> str:
+        text = token.strip()
+        if not text:
+            return ""
+
+        text = os.path.basename(text)
+
+        if "slide" in column.lower() and "." not in text:
+            stem_lower = text.lower()
+            candidate_matches: List[str] = []
+            for other_value in row.values():
+                if not other_value:
+                    continue
+                other_text = os.path.basename(str(other_value).strip())
+                if not other_text or "." not in other_text:
+                    continue
+                if other_text.lower().startswith(stem_lower):
+                    candidate_matches.append(other_text)
+            if candidate_matches:
+                text = min(candidate_matches, key=len)
+
+        return text
+
     parts: List[str] = []
     for column in columns:
         value = row.get(column)
@@ -469,7 +514,9 @@ def _combine_identifier(row: Mapping[str, str], columns: Sequence[str]) -> Optio
             continue
         token = str(value).strip()
         if token:
-            parts.append(token)
+            normalised = _normalise_part(token, column)
+            if normalised:
+                parts.append(normalised)
     if not parts:
         return None
     return "::".join(parts)
@@ -647,6 +694,29 @@ def split_samples_by_feature(
         return expanded
 
     return expand(train_reps), expand(val_reps), expand(test_reps)
+
+
+def _validate_label_coverage(samples: Sequence[Sample], label_map: Mapping[int, str]) -> None:
+    """Ensure that cached feature alignment retains every class from the manifest."""
+
+    if not samples:
+        raise ValueError("No samples remain after aligning with cached features")
+
+    present = {sample.label for sample in samples}
+    if len(label_map) <= 1 or len(present) > 1:
+        return
+
+    missing = sorted(set(label_map.keys()) - present)
+    if not missing:
+        return
+
+    missing_labels = ", ".join(label_map[idx] for idx in missing if idx in label_map)
+    present_label = label_map[next(iter(present))]
+    raise ValueError(
+        "Cached feature alignment only retained samples for label "
+        f"{present_label!r}. Missing labels: {missing_labels}. "
+        "Verify the identifier columns or regenerate the cached features."
+    )
 
 
 def encode_with_plip(
@@ -1247,6 +1317,7 @@ def main() -> None:
                 precomputed,
                 skip_unmatched=args.skip_unmatched,
             )
+            _validate_label_coverage(samples, label_map)
             group_by_feature = True
             print(
                 "Using precomputed features from "
