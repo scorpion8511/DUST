@@ -15,6 +15,7 @@ import csv
 import os
 import random
 import sys
+import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
@@ -239,7 +240,12 @@ def _select_consistent_candidates(
     return indices, label_value
 
 
-def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedFeatureSet) -> None:
+def assign_precomputed_indices(
+    samples: Sequence[Sample],
+    features: PrecomputedFeatureSet,
+    *,
+    skip_unmatched: bool = False,
+) -> None:
     if features.features.shape[0] == len(samples):
         return
 
@@ -360,6 +366,20 @@ def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedF
             sample = samples[sample_idx]
             candidate = sample.identifier or sample.csv_image or os.path.basename(sample.image_path)
             examples.append(str(candidate))
+        if skip_unmatched:
+            message = "Skipping manifest rows without cached feature matches"
+            if examples:
+                message += f": {', '.join(examples)}"
+            warnings.warn(message)
+            if isinstance(samples, list):
+                for sample_idx in sorted(unmatched_samples, reverse=True):
+                    del samples[sample_idx]
+                for new_idx, sample in enumerate(samples):
+                    sample.index = new_idx
+            else:
+                for sample_idx in sorted(unmatched_samples):
+                    samples[sample_idx].feature_index = None
+            return
         message = (
             "Failed to align the manifest rows with the cached features. "
             "Ensure --id-column matches the identifiers used during feature extraction or regenerate the cache."
@@ -1117,6 +1137,13 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-normalize", action="store_true", help="Disable L2 normalisation of embeddings before classification")
+    parser.add_argument(
+        "--skip-unmatched",
+        action="store_true",
+        help=(
+            "Silently drop manifest rows that cannot be aligned with cached feature identifiers instead of raising an error."
+        ),
+    )
     parser.add_argument("--musk-checkpoint", type=str, default="hf_hub:xiangjx/musk")
     parser.add_argument("--musk-precision", choices=["fp16", "fp32"], default="fp16")
     parser.add_argument("--text-tokenizer", type=str, default=None, help="SentencePiece tokenizer path for MUSK")
@@ -1215,7 +1242,11 @@ def main() -> None:
             )
 
         if precomputed.features.shape[0] != len(samples):
-            assign_precomputed_indices(samples, precomputed)
+            assign_precomputed_indices(
+                samples,
+                precomputed,
+                skip_unmatched=args.skip_unmatched,
+            )
             group_by_feature = True
             print(
                 "Using precomputed features from "
