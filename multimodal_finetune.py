@@ -119,7 +119,9 @@ def _maybe_split_token(candidate: str, separator: str) -> List[str]:
     return variants
 
 
-def _normalise_identifier_tokens(value: Optional[object]) -> List[str]:
+def _normalise_identifier_tokens(
+    value: Optional[object], *, allow_partial: bool = True
+) -> List[str]:
     if value is None:
         return []
 
@@ -156,6 +158,14 @@ def _normalise_identifier_tokens(value: Optional[object]) -> List[str]:
             if base and base not in seen:
                 queue.append(base)
 
+        if "::" in candidate:
+            colon_squashed = candidate.replace("::", "_")
+            if colon_squashed and colon_squashed not in seen:
+                queue.append(colon_squashed)
+            colon_slash = candidate.replace("::", "/")
+            if colon_slash and colon_slash not in seen:
+                queue.append(colon_slash)
+
         root, ext = os.path.splitext(candidate)
         if ext and root and root not in seen:
             queue.append(root)
@@ -168,10 +178,11 @@ def _normalise_identifier_tokens(value: Optional[object]) -> List[str]:
         if lowered not in seen:
             queue.append(lowered)
 
-        for separator in ("::", "|", "-", ":"):
-            for variant in _maybe_split_token(candidate, separator):
-                if variant not in seen:
-                    queue.append(variant)
+        if allow_partial:
+            for separator in ("::", "|", "-", ":"):
+                for variant in _maybe_split_token(candidate, separator):
+                    if variant not in seen:
+                        queue.append(variant)
 
     return tokens
 
@@ -180,7 +191,10 @@ def _build_sample_token_index(samples: Sequence[Sample]) -> Dict[str, List[int]]
     token_map: Dict[str, List[int]] = {}
     for idx, sample in enumerate(samples):
         sample_tokens: Set[str] = set()
-        for value in (sample.identifier, sample.csv_image, sample.image_path):
+        if sample.identifier is not None:
+            for token in _normalise_identifier_tokens(sample.identifier, allow_partial=False):
+                sample_tokens.add(token)
+        for value in (sample.csv_image, sample.image_path):
             for token in _normalise_identifier_tokens(value):
                 sample_tokens.add(token)
         for token in sample_tokens:
@@ -222,6 +236,12 @@ def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedF
         )
 
     token_index = _build_sample_token_index(samples)
+    identifier_index: Dict[str, List[int]] = {}
+    for idx, sample in enumerate(samples):
+        if sample.identifier is None:
+            continue
+        for token in _normalise_identifier_tokens(sample.identifier, allow_partial=False):
+            identifier_index.setdefault(token, []).append(idx)
     unmatched_samples = {idx for idx in range(len(samples)) if samples[idx].feature_index is None}
 
     for feature_idx, region_id in enumerate(region_ids):
@@ -234,6 +254,16 @@ def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedF
             raw_ids = [raw_ids]
         matched = False
         for raw_id in raw_ids:
+            identifier_tokens = _normalise_identifier_tokens(raw_id, allow_partial=False)
+            for token in identifier_tokens:
+                for sample_idx in identifier_index.get(token, []):
+                    if sample_idx not in unmatched_samples:
+                        continue
+                    samples[sample_idx].feature_index = feature_idx
+                    unmatched_samples.remove(sample_idx)
+                    matched = True
+            if matched:
+                break
             for token in _normalise_identifier_tokens(raw_id):
                 for sample_idx in token_index.get(token, []):
                     if sample_idx not in unmatched_samples:
