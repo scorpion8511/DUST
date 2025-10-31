@@ -86,23 +86,30 @@ def _extract_labels(payload: Mapping[str, object]) -> Optional[Sequence[object]]
     return None
 
 
-def _strip_magnification_suffixes(identifier: str) -> str:
+def _strip_magnification_suffixes(identifier: str) -> List[str]:
+    """Return progressively stripped variants with trailing ``*_x`` tokens removed."""
+
     parts = identifier.split("_")
     if len(parts) <= 1:
-        return identifier
+        return []
 
-    base_parts: List[str] = []
-    for part in parts:
-        token = part.strip().lower()
+    variants: List[str] = []
+    working = parts[:]
+
+    while working:
+        last = working[-1]
+        token = last.strip().lower()
         if token.endswith("x"):
             magnitude = token[:-1]
             if magnitude.replace(".", "", 1).isdigit():
+                working = working[:-1]
+                if working:
+                    variant = "_".join(working)
+                    variants.append(variant)
                 continue
-        base_parts.append(part)
+        break
 
-    if not base_parts:
-        return identifier
-    return "_".join(base_parts)
+    return variants
 
 
 def _maybe_split_token(candidate: str, separator: str) -> List[str]:
@@ -170,9 +177,12 @@ def _normalise_identifier_tokens(
         if ext and root and root not in seen:
             queue.append(root)
 
-        stripped = _strip_magnification_suffixes(root if ext and root else candidate)
-        if stripped and stripped not in seen:
-            queue.append(stripped)
+        stripped_variants = _strip_magnification_suffixes(
+            root if ext and root else candidate
+        )
+        for stripped in stripped_variants:
+            if stripped and stripped not in seen:
+                queue.append(stripped)
 
         lowered = candidate.lower()
         if lowered not in seen:
