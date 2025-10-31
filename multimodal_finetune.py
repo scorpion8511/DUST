@@ -404,6 +404,43 @@ def split_samples(
     return gather(train_idx), gather(val_idx), gather(test_idx)
 
 
+def split_samples_by_feature(
+    samples: Sequence[Sample],
+    train_ratio: float,
+    val_ratio: float,
+    seed: int,
+) -> Tuple[List[Sample], List[Sample], List[Sample]]:
+    """Split samples while keeping cached feature vectors in a single subset."""
+
+    feature_groups: Dict[int, List[Sample]] = {}
+    for sample in samples:
+        if sample.feature_index is None:
+            raise ValueError(
+                "split_samples_by_feature requires every sample to define feature_index"
+            )
+        feature_groups.setdefault(sample.feature_index, []).append(sample)
+
+    for feature_idx, group in feature_groups.items():
+        labels = {member.label for member in group}
+        if len(labels) > 1:
+            raise ValueError(
+                "Samples aligned to cached feature index "
+                f"{feature_idx} span multiple labels; check the manifest/feature mapping."
+            )
+
+    representatives = [group[0] for group in feature_groups.values()]
+    train_reps, val_reps, test_reps = split_samples(representatives, train_ratio, val_ratio, seed)
+
+    def expand(reps: Sequence[Sample]) -> List[Sample]:
+        expanded: List[Sample] = []
+        for rep in reps:
+            assert rep.feature_index is not None
+            expanded.extend(feature_groups[rep.feature_index])
+        return expanded
+
+    return expand(train_reps), expand(val_reps), expand(test_reps)
+
+
 def encode_with_plip(
     samples: Sequence[Sample],
     model_name: str,
@@ -967,11 +1004,9 @@ def main() -> None:
         filter_values=args.filter_values,
         verify_images=args.features is None,
     )
-    train_samples, val_samples, test_samples = split_samples(
-        samples, args.train_ratio, args.val_ratio, args.seed
-    )
 
     precomputed: Optional[PrecomputedFeatureSet] = None
+    group_by_feature = False
     if args.features:
         precomputed = load_precomputed_feature_set(
             args.features, normalize=not args.no_normalize
@@ -983,12 +1018,22 @@ def main() -> None:
 
         if precomputed.features.shape[0] != len(samples):
             assign_precomputed_indices(samples, precomputed)
+            group_by_feature = True
             print(
                 "Using precomputed features from "
                 f"{args.features} (aligned {len(samples)} manifest rows to {precomputed.features.shape[0]} cached vectors)"
             )
         else:
             print(f"Using precomputed features from {args.features}")
+
+    if group_by_feature:
+        train_samples, val_samples, test_samples = split_samples_by_feature(
+            samples, args.train_ratio, args.val_ratio, args.seed
+        )
+    else:
+        train_samples, val_samples, test_samples = split_samples(
+            samples, args.train_ratio, args.val_ratio, args.seed
+        )
 
     encoder_kwargs = dict(
         model_name=args.model,
