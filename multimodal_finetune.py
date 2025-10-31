@@ -416,7 +416,16 @@ def read_manifest(
             if verify_images and not os.path.exists(image_path):
                 raise FileNotFoundError(f"Missing image: {image_path}")
             text = row[text_column]
-            label_name = row[label_column]
+            raw_label = row[label_column]
+            if raw_label is None:
+                raise ValueError(
+                    f"Missing label value in column {label_column!r} for row {len(samples)}"
+                )
+            label_name = str(raw_label).strip()
+            if not label_name:
+                raise ValueError(
+                    f"Empty label value in column {label_column!r} for row {len(samples)}"
+                )
             if label_name not in label_to_index:
                 label_to_index[label_name] = len(label_to_index)
             label_idx = label_to_index[label_name]
