@@ -10,6 +10,15 @@ multi-scale dispersion term
 
 where ``mu_c(m)`` is the class centroid at magnification ``m``.
 
+The script also aggregates a Fisher-style between/within-class ratio for each
+magnification
+
+    Fisher(m) = mean_inter_class_centroid_distance / mean_within_class_scatter,
+
+so the textual summary captures both cross-scale stability (Delta_c) and
+per-scale separability (Fisher(m)).  The visualisation restricts itself to
+centroids and covariance ellipses to avoid clutter from the full scatter plot.
+
 The defaults target the TCGA unimodal features bundled with the scoring
 pipeline, but additional dataset/model mappings can easily be added to the
 ``DEFAULT_DATASET_MODEL_PATHS`` table below.
@@ -255,6 +264,74 @@ def compute_class_summaries(
     return summaries
 
 
+def compute_fisher_statistics(
+    summaries: Mapping[str, ClassSummary]
+) -> Dict[str, Dict[str, float]]:
+    """Return Fisher-style between/within ratios per magnification.
+
+    For each magnification the function gathers the available class centroids
+    and covariance estimates, computes the mean pairwise centroid distance, and
+    divides it by the mean within-class scatter (trace of the covariance).
+    """
+
+    magnifications = sorted(
+        {
+            mag
+            for summary in summaries.values()
+            for mag in summary.stats.keys()
+        },
+        key=lambda m: _canonicalise_magnification(m)[0],
+    )
+
+    fisher: Dict[str, Dict[str, float]] = {}
+
+    for mag in magnifications:
+        centroids: List[np.ndarray] = []
+        scatters: List[Tuple[float, int]] = []
+
+        for summary in summaries.values():
+            stat = summary.stats.get(mag)
+            if not stat:
+                continue
+            centroids.append(stat.centroid)
+            scatter = float(np.trace(stat.covariance))
+            scatters.append((scatter, stat.count))
+
+        if not centroids:
+            continue
+
+        if len(centroids) >= 2:
+            total = 0.0
+            num_pairs = 0
+            for a, b in combinations(range(len(centroids)), 2):
+                dist = float(np.linalg.norm(centroids[a] - centroids[b]))
+                total += dist
+                num_pairs += 1
+            mean_inter = total / num_pairs if num_pairs else float("nan")
+        else:
+            mean_inter = float("nan")
+
+        if scatters:
+            total_scatter = sum(value * count for value, count in scatters)
+            total_count = sum(count for _, count in scatters)
+            mean_within = total_scatter / total_count if total_count else float("nan")
+        else:
+            mean_within = float("nan")
+
+        if math.isnan(mean_within) or math.isclose(mean_within, 0.0):
+            ratio = float("nan")
+        else:
+            ratio = mean_inter / mean_within
+
+        fisher[mag] = {
+            "mean_inter": mean_inter,
+            "mean_within": mean_within,
+            "ratio": ratio,
+        }
+
+    return fisher
+
+
 def _plot_class_dispersion(
     coords: np.ndarray,
     labels: Sequence[str],
@@ -275,15 +352,6 @@ def _plot_class_dispersion(
 
     for class_index, cls in enumerate(classes):
         colour = colors(class_index)
-        class_mask = [i for i, c in enumerate(labels) if c == cls]
-        ax.scatter(
-            coords[class_mask, 0],
-            coords[class_mask, 1],
-            s=8,
-            color=colour,
-            alpha=0.2,
-            label=None,
-        )
 
         for mag in mag_labels:
             stat = summaries[cls].stats.get(mag)
@@ -315,15 +383,6 @@ def _plot_class_dispersion(
                 marker=marker_map[mag],
                 s=80,
                 label=None,
-            )
-            ax.text(
-                centroid[0],
-                centroid[1],
-                f"{cls}@{mag}",
-                color=colour,
-                fontsize=9,
-                ha="center",
-                va="bottom",
             )
 
     handles = [
@@ -470,6 +529,21 @@ def main() -> None:
             cx, cy = stat.centroid
             print(
                 f"    • {mag}: n={stat.count}, centroid=({cx:.4f}, {cy:.4f})"
+            )
+
+    fisher_stats = compute_fisher_statistics(summaries)
+    if fisher_stats:
+        print("\nFisher separability by magnification:")
+        for mag in sorted(
+            fisher_stats.keys(), key=lambda m: _canonicalise_magnification(m)[0]
+        ):
+            metrics = fisher_stats[mag]
+            mean_inter = metrics["mean_inter"]
+            mean_within = metrics["mean_within"]
+            ratio = metrics["ratio"]
+            print(
+                f"- {mag}: mean_inter={mean_inter:.4f}, "
+                f"mean_within={mean_within:.4f}, Fisher={ratio:.4f}"
             )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
