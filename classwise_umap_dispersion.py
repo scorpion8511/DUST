@@ -27,6 +27,10 @@ from typing import Dict, Iterable, List, Mapping, MutableMapping, Sequence, Tupl
 import numpy as np
 import pandas as pd
 import torch
+import matplotlib
+
+matplotlib.use("Agg")
+
 from matplotlib import pyplot as plt
 from matplotlib.patches import Ellipse
 
@@ -340,7 +344,9 @@ def _plot_class_dispersion(
     ax.grid(True, linestyle=":", alpha=0.3)
 
     fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=300)
+    print(f"Saved UMAP dispersion figure to {output_path}")
     plt.close(fig)
 
 
