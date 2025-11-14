@@ -1,4 +1,4 @@
-"""Class-wise UMAP centroids and cross-scale dispersion for unimodal models.
+"""Class-wise UMAP centroids and cross-scale dispersion for foundation models.
 
 This utility loads pre-computed feature archives for a supported dataset/model
 pair, projects the embeddings into 2D with UMAP, and summarises how each class
@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
+import warnings
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, MutableMapping, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -56,9 +58,14 @@ except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency che
 # Dataset configuration
 # ---------------------------------------------------------------------------
 
+UNIMODAL = "unimodal"
+MULTIMODAL = "multimodal"
+
+
 DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, Mapping[str, object]]] = {
     "TCGA": {
         "uni": {
+            "type": UNIMODAL,
             "train": "/home/jovyan/work/tran_est/MUST/features_unimodal/uni_train_features.pth",
             "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/uni_eval_features.pth",
             "msci": {
@@ -69,6 +76,7 @@ DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, Mapping[str, object]]] = {
             },
         },
         "conch": {
+            "type": UNIMODAL,
             "train": "/home/jovyan/work/tran_est/MUST/features_unimodal/conch_train_features.pth",
             "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/conch_eval_features.pth",
             "msci": {
@@ -79,6 +87,7 @@ DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, Mapping[str, object]]] = {
             },
         },
         "giga": {
+            "type": UNIMODAL,
             "train": "/home/jovyan/work/tran_est/MUST/features_unimodal/giga_train_features.pth",
             "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/giga_eval_features.pth",
             "msci": {
@@ -89,6 +98,7 @@ DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, Mapping[str, object]]] = {
             },
         },
         "phikon": {
+            "type": UNIMODAL,
             "train": "/home/jovyan/work/tran_est/MUST/features_unimodal/phikon_train_features.pth",
             "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/phikon_eval_features.pth",
             "msci": {
@@ -99,6 +109,7 @@ DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, Mapping[str, object]]] = {
             },
         },
         "virchow": {
+            "type": UNIMODAL,
             "train": "/home/jovyan/work/tran_est/MUST/features_unimodal/virchow_train_features.pth",
             "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/virchow_eval_features.pth",
             "msci": {
@@ -108,7 +119,153 @@ DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, Mapping[str, object]]] = {
                 "label_column": "label",
             },
         },
-    }
+    },
+    "TCGA_MULTIMODAL": {
+        "plip": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features/plip_features02.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_TCGA/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+        "musk": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features/musk_features02.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_TCGA/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+        "conch": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features/conch_features02.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_TCGA/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+        "pathgen": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features/pathgen_features02.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_TCGA/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+    },
+    "CAM_MULTIMODAL": {
+        "plip": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features_multi_cam/plip_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+        "musk": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features_multi_cam/musk_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+        "conch": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features_multi_cam/conch_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+        "pathgen": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features_multi_cam/pathgen_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+        "biomed": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features_multi_cam/biomed_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+    },
+    "BACH_MULTIMODAL": {
+        "plip": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features_multi_bach/plip_features03.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BACH/output/patches_paired.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+        "musk": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features_multi_bach/musk_features03.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BACH/output/patches_paired.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+        "conch": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features_multi_bach/conch_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BACH/output/patches_paired.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+        "pathgen": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features_multi_bach/pathgen_features03.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BACH/output/patches_paired.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+        "biomed": {
+            "type": MULTIMODAL,
+            "path": "/home/jovyan/work/tran_est/MUST/features_multi_bach/biomed_features03.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BACH/output/patches_paired.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "label_column": "label",
+            },
+        },
+    },
 }
 
 
@@ -156,7 +313,7 @@ def _load_manifest(msci_config: Mapping[str, object]) -> pd.DataFrame | None:
     return df
 
 
-def _extract_samples(
+def _extract_unimodal_samples(
     payload: Mapping[str, object],
     manifest: pd.DataFrame | None,
     region_column: str,
@@ -195,6 +352,196 @@ def _extract_samples(
         raise ValueError("Unable to recover class labels for the feature payload")
 
     return SampleBatch(embeddings=embeddings, labels=labels, magnifications=magnifications)
+
+
+def _identifier_variants(value: str) -> List[str]:
+    tokens: Dict[str, None] = {}
+
+    def _add(token: Optional[str]) -> None:
+        if token is None:
+            return
+        text = token.strip()
+        if not text:
+            return
+        tokens.setdefault(text, None)
+        tokens.setdefault(text.lower(), None)
+
+    _add(value)
+    if "::" in value:
+        _add(value.split("::", 1)[1])
+    base = os.path.basename(value)
+    _add(base)
+    if "::" in base:
+        _add(base.split("::", 1)[1])
+    root, _ = os.path.splitext(base)
+    _add(root)
+    if "::" in root:
+        _add(root.split("::", 1)[1])
+    segment = root
+    while "_" in segment:
+        segment = segment.rsplit("_", 1)[0]
+        _add(segment)
+    return list(tokens.keys())
+
+
+def _build_manifest_lookup(
+    manifest: pd.DataFrame,
+    region_column: str,
+    label_column: str,
+) -> Dict[str, str]:
+    lookup: Dict[str, str] = {}
+    ambiguous: set[str] = set()
+
+    region_series = manifest[region_column].astype(str)
+    label_series = manifest[label_column].astype(str)
+
+    for region_value, label_value in zip(region_series, label_series, strict=False):
+        variants = _identifier_variants(region_value)
+        clean_label = label_value.strip()
+        for token in variants:
+            if token in ambiguous:
+                continue
+            if token in lookup:
+                if lookup[token] != clean_label:
+                    ambiguous.add(token)
+                    lookup.pop(token, None)
+                continue
+            lookup[token] = clean_label
+
+    if ambiguous:
+        warnings.warn(
+            "Some manifest identifiers map to multiple labels; those entries were ignored during lookup.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    return lookup
+
+
+def _resolve_region_labels(
+    metadata: Mapping[str, object],
+    manifest: Optional[pd.DataFrame],
+    region_column: str,
+    label_column: Optional[str],
+) -> List[str]:
+    region_ids = list(map(str, metadata.get("region_ids", [])))
+    if not region_ids:
+        raise ValueError("Multimodal feature archive is missing region identifiers in metadata")
+
+    raw_labels = metadata.get("labels")
+    if isinstance(raw_labels, Sequence) and len(raw_labels) == len(region_ids):
+        processed = [str(value).strip() for value in raw_labels]
+        if len({label for label in processed if label}) >= 1:
+            return processed
+
+    if manifest is None:
+        raise ValueError("Manifest is required to resolve class labels for multimodal features")
+
+    csv_mapping = metadata.get("csv_region_mapping", {})
+    if not isinstance(csv_mapping, Mapping):
+        csv_mapping = {}
+
+    candidate_columns: List[str] = []
+    if label_column and label_column in manifest.columns:
+        candidate_columns.append(label_column)
+    for fallback in ("label", "labels", "subtype"):
+        if fallback in manifest.columns and fallback not in candidate_columns:
+            candidate_columns.append(fallback)
+
+    if not candidate_columns:
+        raise ValueError("Manifest does not contain any suitable label columns")
+
+    for column in candidate_columns:
+        lookup = _build_manifest_lookup(manifest, region_column, column)
+        resolved: List[str] = []
+        missing: List[str] = []
+        for region_id in region_ids:
+            candidates = _identifier_variants(region_id)
+            if region_id in csv_mapping:
+                for item in csv_mapping[region_id]:
+                    candidates.extend(_identifier_variants(str(item)))
+            seen: Dict[str, None] = {}
+            label_value: Optional[str] = None
+            for candidate in candidates:
+                if candidate in seen:
+                    continue
+                seen[candidate] = None
+                if candidate in lookup:
+                    label_value = lookup[candidate]
+                    break
+            if label_value is None:
+                missing.append(region_id)
+                break
+            resolved.append(label_value)
+        if resolved and len(resolved) == len(region_ids):
+            return resolved
+        if missing:
+            warnings.warn(
+                (
+                    f"Unable to resolve labels for regions {missing[:5]} using column '{column}'. "
+                    "Trying fallback columns if available."
+                ),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    raise ValueError("Failed to resolve class labels for the multimodal features")
+
+
+def _extract_multimodal_samples(
+    payload: Mapping[str, object],
+    manifest: Optional[pd.DataFrame],
+    region_column: str,
+    label_column: Optional[str],
+) -> SampleBatch:
+    if "image_embeddings" not in payload:
+        raise ValueError("Multimodal feature archive does not contain 'image_embeddings'")
+
+    raw_images = payload["image_embeddings"]
+    if not isinstance(raw_images, Mapping):
+        raise TypeError("Expected a mapping of magnification to image embeddings")
+
+    metadata = payload.get("metadata") if isinstance(payload, Mapping) else None
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+
+    labels = _resolve_region_labels(metadata, manifest, region_column, label_column)
+
+    image_embeddings: Dict[float, np.ndarray] = {}
+    for key, value in raw_images.items():
+        try:
+            mag = float(key)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid magnification key in image embeddings: {key!r}") from None
+        image_embeddings[mag] = _to_numpy(value)
+
+    if not image_embeddings:
+        raise ValueError("No image embeddings were found in the multimodal archive")
+
+    ordered_mags = sorted(
+        image_embeddings.keys(), key=lambda mag: _canonicalise_magnification(mag)[0]
+    )
+    ordered_labels = []
+    ordered_magnifications: List[str] = []
+    embedding_blocks: List[np.ndarray] = []
+
+    num_regions = len(labels)
+    for mag in ordered_mags:
+        tensor = image_embeddings[mag]
+        if tensor.ndim != 2:
+            raise ValueError(f"Embeddings for magnification {mag} must be rank-2 tensors")
+        if tensor.shape[0] != num_regions:
+            raise ValueError(
+                f"Magnification {mag} contains {tensor.shape[0]} embeddings but metadata lists {num_regions} regions"
+            )
+        embedding_blocks.append(tensor)
+        label_copy = [str(label) for label in labels]
+        ordered_labels.extend(label_copy)
+        _, label_mag = _canonicalise_magnification(mag)
+        ordered_magnifications.extend([label_mag] * num_regions)
+
+    embeddings = np.concatenate(embedding_blocks, axis=0).astype(np.float32)
+    return SampleBatch(embeddings=embeddings, labels=ordered_labels, magnifications=ordered_magnifications)
 
 
 def _concatenate_batches(batches: Iterable[SampleBatch]) -> SampleBatch:
@@ -464,9 +811,11 @@ def main() -> None:
         )
 
     model_cfg = dataset_config[args.model]
-    msci_cfg = model_cfg.get("msci") if isinstance(model_cfg, MutableMapping) else None
     if not isinstance(model_cfg, Mapping):
         raise SystemExit("Model configuration must be a mapping with feature paths")
+
+    model_type = str(model_cfg.get("type", UNIMODAL))
+    msci_cfg = model_cfg.get("msci") if isinstance(model_cfg, MutableMapping) else None
 
     manifest = _load_manifest(msci_cfg or {}) if msci_cfg else None
     region_column = str(msci_cfg.get("region_column", "region")) if msci_cfg else "region"
@@ -476,30 +825,64 @@ def main() -> None:
     label_column = str(msci_cfg.get("label_column")) if msci_cfg and msci_cfg.get("label_column") else None
 
     payloads: List[SampleBatch] = []
-    splits: Sequence[str]
-    if args.split == "both":
-        splits = ("train", "eval")
-    else:
-        splits = (args.split,)
+    if model_type == MULTIMODAL:
+        path_map: Dict[str, object] = {}
+        for split_key in ("train", "eval"):
+            if split_key in model_cfg:
+                path_map[split_key] = model_cfg[split_key]
+        if "path" in model_cfg:
+            path_map.setdefault("eval", model_cfg["path"])
 
-    for split in splits:
-        path = model_cfg.get(split)
-        if not path:
-            continue
-        feature_path = Path(str(path)).expanduser()
-        if not feature_path.exists():  # pragma: no cover - safety check
-            raise FileNotFoundError(f"Feature archive not found: {feature_path}")
-        payload = torch.load(feature_path, map_location="cpu")
-        if "embeddings" not in payload:
-            raise ValueError(f"Feature archive '{feature_path}' does not contain embeddings")
-        batch = _extract_samples(
-            payload,
-            manifest,
-            region_column=region_column,
-            magnification_column=magnification_column,
-            label_column=label_column,
-        )
-        payloads.append(batch)
+        if not path_map:
+            raise SystemExit("Multimodal configuration must define at least one feature path")
+
+        if args.split == "both":
+            splits = tuple(path_map.keys())
+        else:
+            splits = (args.split,) if args.split in path_map else ()
+            if not splits:
+                splits = tuple(path_map.keys())
+
+        for split in splits:
+            path = path_map.get(split)
+            if not path:
+                continue
+            feature_path = Path(str(path)).expanduser()
+            if not feature_path.exists():  # pragma: no cover - safety check
+                raise FileNotFoundError(f"Feature archive not found: {feature_path}")
+            payload = torch.load(feature_path, map_location="cpu")
+            batch = _extract_multimodal_samples(
+                payload,
+                manifest,
+                region_column=region_column,
+                label_column=label_column,
+            )
+            payloads.append(batch)
+    else:
+        splits: Sequence[str]
+        if args.split == "both":
+            splits = ("train", "eval")
+        else:
+            splits = (args.split,)
+
+        for split in splits:
+            path = model_cfg.get(split)
+            if not path:
+                continue
+            feature_path = Path(str(path)).expanduser()
+            if not feature_path.exists():  # pragma: no cover - safety check
+                raise FileNotFoundError(f"Feature archive not found: {feature_path}")
+            payload = torch.load(feature_path, map_location="cpu")
+            if "embeddings" not in payload:
+                raise ValueError(f"Feature archive '{feature_path}' does not contain embeddings")
+            batch = _extract_unimodal_samples(
+                payload,
+                manifest,
+                region_column=region_column,
+                magnification_column=magnification_column,
+                label_column=label_column,
+            )
+            payloads.append(batch)
 
     if not payloads:
         raise SystemExit("No feature payloads were loaded. Check the configuration paths.")
