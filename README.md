@@ -364,11 +364,17 @@ pipelines.
 
 `multimodal_scoring.py` implements the Magnification-Scale Consistency
 Index (MSCI) and a cross-modal mutual information lower bound (CMI-LB)
-for paired image/text embeddings stored in `.pth` files. Each feature
-file must contain a `text_embeddings` tensor and an
-`image_embeddings` dictionary mapping magnification levels (e.g. 5/10/20)
-to the corresponding image feature tensors. To evaluate one or more
-feature sets, run:
+for paired image/text embeddings stored in `.pth` files. CMI-LB is the
+same symmetric InfoNCE objective used elsewhere in the codebase: for
+each magnification, logits = `image_embeddings @ text_embeddingsᵀ / τ`
+feed two log-softmax terms (image→text and text→image), and the mean of
+`log(N) – CE` across the two directions yields the lower bound on
+mutual information. Because each magnification is scored independently
+then averaged, the value directly reflects cross-scale semantic
+alignment between the vision and text encoders. Each feature file must
+contain a `text_embeddings` tensor and an `image_embeddings` dictionary
+mapping magnification levels (e.g. 5/10/20) to the corresponding image
+feature tensors. To evaluate one or more feature sets, run:
 
 ```bash
 python multimodal_scoring.py /path/to/plip_features.pth /path/to/musk_features.pth \
