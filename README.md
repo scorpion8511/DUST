@@ -50,6 +50,16 @@ HoI, and MSCI metrics (falling back to the first two when MSCI is
 unavailable) before reporting per-dataset Kendall τ correlations with
 ground-truth accuracy.
 
+The Gabor Energy metric measures how much diagnostically useful texture a
+representation retains by first reshaping embeddings into square “token images,”
+filtering them with an oriented, band-pass Gabor bank, and taking the magnitude
+of the complex responses. These magnitudes are z-scored, optionally reduced with
+PCA, and passed through a linear discriminant analysis (LDA) head fitted on the
+training split; the final energy score is the log-sum-exp of the resulting LDA
+logits on the evaluation split. This aligns the metric with the code in
+`gabor_eng.py`, where the meaningful signal comes from the discriminative power
+of the Gabor responses rather than simply pooling their squared amplitudes.
+
 ### MSCI for single-modality embeddings
 
 In addition to the Gabor/Fisher metrics, the scoring pipeline can now
