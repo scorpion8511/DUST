@@ -121,40 +121,69 @@ def compute_energy_distributions(
     return results
 
 
+def _compute_global_bins(
+    distributions: Dict[str, Dict[str, List[float]]], bin_count: int = 40
+) -> torch.Tensor:
+    """Return shared histogram bin edges across every dataset/model."""
+
+    all_values: List[float] = []
+    for models in distributions.values():
+        for values in models.values():
+            all_values.extend(values)
+
+    if not all_values:
+        return torch.linspace(0.0, 1.0, bin_count + 1)
+
+    min_v = min(all_values)
+    max_v = max(all_values)
+    if max_v - min_v < 1e-6:
+        max_v = min_v + 1.0
+
+    # Pad the range slightly so means and tails are visible together.
+    pad = 0.02 * (max_v - min_v)
+    return torch.linspace(min_v - pad, max_v + pad, bin_count + 1)
+
+
 def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output: pathlib.Path) -> None:
     datasets = list(distributions.keys())
     num_datasets = len(datasets)
-    fig, axes = plt.subplots(1, num_datasets, figsize=(7 * num_datasets, 4), squeeze=False)
+    fig, axes = plt.subplots(1, num_datasets, figsize=(8 * num_datasets, 4.5), squeeze=False)
 
+    bins = _compute_global_bins(distributions)
     palette = ["#4C72B0", "#55A868", "#C44E52", "#8172B3", "#64B5CD", "#CCB974"]
+
     for idx, (ax, dataset) in enumerate(zip(axes[0], datasets)):
         models = list(distributions[dataset].keys())
-        all_values = [v for values in distributions[dataset].values() for v in values]
-        if not all_values:
+        if not models:
             continue
-        min_v, max_v = min(all_values), max(all_values)
-        bin_count = 30
-        bins = torch.linspace(min_v, max(max_v, min_v + 1e-6), bin_count + 1)
 
+        handles = []
+        labels = []
         for j, model in enumerate(models):
             values = torch.tensor(distributions[dataset][model])
             color = palette[j % len(palette)]
-            ax.hist(
+            hist = ax.hist(
                 values.numpy(),
                 bins=bins.numpy(),
                 density=True,
-                alpha=0.45,
+                alpha=0.4,
                 color=color,
                 edgecolor="white",
-                linewidth=0.5,
-                label=f"{model} (mean={values.mean():.2f})",
+                linewidth=0.6,
+                label=None,
             )
+
+            mean_val = float(values.mean()) if values.numel() else float("nan")
+            handle = ax.axvline(mean_val, color=color, linestyle="-", linewidth=1.8)
+            handles.append(handle)
+            labels.append(f"{model} (mean={mean_val:.2f})")
 
         ax.set_title(dataset)
         ax.set_xlabel("Energy Score")
         if idx == 0:
-            ax.set_ylabel("Frequency")
-        ax.legend(frameon=False)
+            ax.set_ylabel("Density")
+        ax.legend(handles, labels, frameon=False)
+        ax.grid(alpha=0.2, linestyle=":", linewidth=0.5)
 
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
