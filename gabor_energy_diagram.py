@@ -16,13 +16,18 @@ from __future__ import annotations
 
 import argparse
 import pathlib
-from typing import Dict, Mapping
+from typing import Dict, List, Mapping
 
 import matplotlib
 import matplotlib.pyplot as plt
 import torch
 
-from gabor_eng import compute_gabor_scores
+from gabor_eng import (
+    LDA,
+    compute_gabor_features,
+    to_tensor,
+    _apply_pca,
+)
 
 # Use a non-interactive backend so plots can be generated headlessly.
 matplotlib.use("Agg")
@@ -54,24 +59,48 @@ DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, Mapping[str, str]]] = {
 }
 
 
-def _compute_energy_from_paths(train_path: str, eval_path: str, device: str) -> float:
+def _compute_energy_distribution_from_paths(
+    train_path: str,
+    eval_path: str,
+    device: str,
+    pca_dim: int = 128,
+) -> List[float]:
+    """Return per-sample Gabor energy scores for a train/eval feature pair."""
+
     train = torch.load(train_path, map_location=device)
     evald = torch.load(eval_path, map_location=device)
-    scores = compute_gabor_scores(
-        train["embeddings"],
-        train["labels"],
-        evald["embeddings"],
-        evald["labels"],
-        device=device,
-    )
-    return float(scores["energy"])
+
+    train_embeddings = to_tensor(train["embeddings"], device)
+    eval_embeddings = to_tensor(evald["embeddings"], device)
+    train_labels = to_tensor(train["labels"], device).long()
+    eval_labels = to_tensor(evald["labels"], device).long()
+
+    train_feats = compute_gabor_features(train_embeddings, device=device)
+    eval_feats = compute_gabor_features(eval_embeddings, device=device)
+
+    mean = train_feats.mean(0, keepdim=True)
+    std = train_feats.std(0, keepdim=True).clamp_min(1e-6)
+    train_feats = (train_feats - mean) / std
+    eval_feats = (eval_feats - mean) / std
+
+    if pca_dim:
+        pca_dim = min(pca_dim, train_feats.shape[0], train_feats.shape[1])
+        if pca_dim > 0:
+            train_feats, eval_feats = _apply_pca(train_feats, eval_feats, pca_dim)
+
+    lda = LDA(shrinkage=0.1, device=device)
+    lda.fit(train_feats, train_labels)
+    logits = eval_feats @ lda.coef_.T + lda.intercept_
+
+    energies = torch.logsumexp(logits, dim=-1)
+    return energies.cpu().tolist()
 
 
-def compute_energy_scores(
+def compute_energy_distributions(
     dataset_model_paths: Dict[str, Dict[str, Mapping[str, str]]],
     device: str,
-) -> Dict[str, Dict[str, float]]:
-    results: Dict[str, Dict[str, float]] = {}
+) -> Dict[str, Dict[str, List[float]]]:
+    results: Dict[str, Dict[str, List[float]]] = {}
     for dataset, models in dataset_model_paths.items():
         results[dataset] = {}
         print(f"\n=== Dataset: {dataset} ===")
@@ -83,33 +112,49 @@ def compute_energy_scores(
             print(f"Processing model: {model_name}")
             print(f"  Train features: {train_path}")
             print(f"  Eval features:  {eval_path}")
-            energy = _compute_energy_from_paths(train_path, eval_path, device)
-            results[dataset][model_name] = energy
-            print(f"  Gabor Energy:   {energy:.6f}")
+            energies = _compute_energy_distribution_from_paths(train_path, eval_path, device)
+            results[dataset][model_name] = energies
+            print(
+                f"  Gabor Energy:   mean={float(torch.tensor(energies).mean()):.4f},"
+                f" std={float(torch.tensor(energies).std()):.4f}"
+            )
     return results
 
 
-def plot_energy_diagram(scores: Dict[str, Dict[str, float]], output: pathlib.Path) -> None:
-    datasets = list(scores.keys())
+def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output: pathlib.Path) -> None:
+    datasets = list(distributions.keys())
     num_datasets = len(datasets)
-    fig, axes = plt.subplots(1, num_datasets, figsize=(6 * num_datasets, 5), squeeze=False)
+    fig, axes = plt.subplots(1, num_datasets, figsize=(7 * num_datasets, 4), squeeze=False)
 
-    for ax, dataset in zip(axes[0], datasets):
-        models = list(scores[dataset].keys())
-        energies = [scores[dataset][m] for m in models]
-        bars = ax.bar(models, energies, color="#4C72B0")
-        ax.set_title(f"{dataset} Gabor Energy")
-        ax.set_ylabel("Energy score")
-        ax.set_ylim(bottom=0)
-        ax.tick_params(axis="x", rotation=45, labelrotation=45)
-        for bar, energy in zip(bars, energies):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2.0,
-                bar.get_height(),
-                f"{energy:.3f}",
-                ha="center",
-                va="bottom",
+    palette = ["#4C72B0", "#55A868", "#C44E52", "#8172B3", "#64B5CD", "#CCB974"]
+    for idx, (ax, dataset) in enumerate(zip(axes[0], datasets)):
+        models = list(distributions[dataset].keys())
+        all_values = [v for values in distributions[dataset].values() for v in values]
+        if not all_values:
+            continue
+        min_v, max_v = min(all_values), max(all_values)
+        bin_count = 30
+        bins = torch.linspace(min_v, max(max_v, min_v + 1e-6), bin_count + 1)
+
+        for j, model in enumerate(models):
+            values = torch.tensor(distributions[dataset][model])
+            color = palette[j % len(palette)]
+            ax.hist(
+                values.numpy(),
+                bins=bins.numpy(),
+                density=True,
+                alpha=0.45,
+                color=color,
+                edgecolor="white",
+                linewidth=0.5,
+                label=f"{model} (mean={values.mean():.2f})",
             )
+
+        ax.set_title(dataset)
+        ax.set_xlabel("Energy Score")
+        if idx == 0:
+            ax.set_ylabel("Frequency")
+        ax.legend(frameon=False)
 
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -138,7 +183,7 @@ def main() -> None:
     if not selected:
         raise ValueError("No datasets selected. Check the --dataset argument.")
 
-    scores = compute_energy_scores(selected, device=args.device)
+    scores = compute_energy_distributions(selected, device=args.device)
     plot_energy_diagram(scores, args.output)
 
 
