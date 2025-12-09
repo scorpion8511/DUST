@@ -145,24 +145,43 @@ def _compute_global_bins(
 
 
 def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output: pathlib.Path) -> None:
+    """Draw per-model Gabor energy histograms and a companion mean-energy bar plot.
+
+    The top row shows density-normalised histograms with shared bins so models can be
+    compared on a common energy axis. The bottom row adds a summary bar chart of the
+    same mean energies, providing a quick visual rank-ordering alongside the detailed
+    distributions.
+    """
+
     datasets = list(distributions.keys())
     num_datasets = len(datasets)
-    fig, axes = plt.subplots(1, num_datasets, figsize=(8 * num_datasets, 4.5), squeeze=False)
+    fig, axes = plt.subplots(
+        2,
+        num_datasets,
+        figsize=(8 * num_datasets, 7.5),
+        squeeze=False,
+        gridspec_kw={"height_ratios": [3.2, 1.4]},
+    )
 
     bins = _compute_global_bins(distributions)
     palette = ["#4C72B0", "#55A868", "#C44E52", "#8172B3", "#64B5CD", "#CCB974"]
 
-    for idx, (ax, dataset) in enumerate(zip(axes[0], datasets)):
+    for col_idx, dataset in enumerate(datasets):
+        hist_ax = axes[0][col_idx]
+        bar_ax = axes[1][col_idx]
         models = list(distributions[dataset].keys())
         if not models:
             continue
 
         handles = []
         labels = []
+        mean_values: List[float] = []
+        colors: List[str] = []
+
         for j, model in enumerate(models):
             values = torch.tensor(distributions[dataset][model])
             color = palette[j % len(palette)]
-            hist = ax.hist(
+            hist_ax.hist(
                 values.numpy(),
                 bins=bins.numpy(),
                 density=True,
@@ -174,16 +193,27 @@ def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output
             )
 
             mean_val = float(values.mean()) if values.numel() else float("nan")
-            handle = ax.axvline(mean_val, color=color, linestyle="-", linewidth=1.8)
+            handle = hist_ax.axvline(mean_val, color=color, linestyle="-", linewidth=1.8)
             handles.append(handle)
             labels.append(f"{model} (mean={mean_val:.2f})")
 
-        ax.set_title(dataset)
-        ax.set_xlabel("Energy Score")
-        if idx == 0:
-            ax.set_ylabel("Density")
-        ax.legend(handles, labels, frameon=False)
-        ax.grid(alpha=0.2, linestyle=":", linewidth=0.5)
+            mean_values.append(mean_val)
+            colors.append(color)
+
+        hist_ax.set_title(dataset)
+        hist_ax.set_xlabel("Gabor Energy")
+        if col_idx == 0:
+            hist_ax.set_ylabel("Density")
+        hist_ax.legend(handles, labels, frameon=False)
+        hist_ax.grid(alpha=0.2, linestyle=":", linewidth=0.5)
+
+        # Companion mean-energy bars for quick model comparison.
+        bar_positions = range(len(models))
+        bar_ax.bar(bar_positions, mean_values, color=colors, alpha=0.8)
+        bar_ax.set_xticks(list(bar_positions))
+        bar_ax.set_xticklabels(models, rotation=20, ha="right")
+        bar_ax.set_ylabel("Mean energy")
+        bar_ax.grid(alpha=0.2, linestyle=":", linewidth=0.5, axis="y")
 
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
