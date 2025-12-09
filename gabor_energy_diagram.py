@@ -20,6 +20,7 @@ from typing import Dict, List, Mapping
 
 import matplotlib
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import torch
 
 from gabor_eng import (
@@ -55,6 +56,16 @@ DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, Mapping[str, str]]] = {
             "train": "/home/jovyan/work/tran_est/MUST/features_unimodal/virchow_train_features.pth",
             "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal/virchow_eval_features.pth",
         },
+    }
+}
+
+DEFAULT_ACCURACIES: Dict[str, Dict[str, float]] = {
+    "TCGA": {
+        "uni": 0.6856,
+        "conch": 0.6916,
+        "giga": 0.7108,
+        "phikon": 0.6675,
+        "virchow": 0.6952,
     }
 }
 
@@ -145,13 +156,7 @@ def _compute_global_bins(
 
 
 def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output: pathlib.Path) -> None:
-    """Draw per-model Gabor energy histograms and a companion mean-energy bar plot.
-
-    The top row shows density-normalised histograms with shared bins so models can be
-    compared on a common energy axis. The bottom row adds a summary bar chart of the
-    same mean energies, providing a quick visual rank-ordering alongside the detailed
-    distributions.
-    """
+    """Draw per-model Gabor energy histograms and a companion mean-energy bar plot."""
 
     datasets = list(distributions.keys())
     num_datasets = len(datasets)
@@ -181,7 +186,7 @@ def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output
         for j, model in enumerate(models):
             values = torch.tensor(distributions[dataset][model])
             color = palette[j % len(palette)]
-            hist_ax.hist(
+            _, _, patches = hist_ax.hist(
                 values.numpy(),
                 bins=bins.numpy(),
                 density=True,
@@ -193,9 +198,13 @@ def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output
             )
 
             mean_val = float(values.mean()) if values.numel() else float("nan")
-            handle = hist_ax.axvline(mean_val, color=color, linestyle="-", linewidth=1.8)
-            handles.append(handle)
-            labels.append(f"{model} (mean={mean_val:.2f})")
+            handle = patches[0] if patches else None
+            if handle:
+                handles.append(handle)
+                if dataset in DEFAULT_ACCURACIES and model in DEFAULT_ACCURACIES[dataset]:
+                    labels.append(f"{model} (acc={DEFAULT_ACCURACIES[dataset][model]:.4f})")
+                else:
+                    labels.append(model)
 
             mean_values.append(mean_val)
             colors.append(color)
@@ -214,6 +223,9 @@ def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output
         bar_ax.set_xticklabels(models, rotation=20, ha="right")
         bar_ax.set_ylabel("Mean energy")
         bar_ax.grid(alpha=0.2, linestyle=":", linewidth=0.5, axis="y")
+
+        legend_handle = mpatches.Patch(color="gray", alpha=0.5, label="Mean energy")
+        bar_ax.legend(handles=[legend_handle], frameon=False)
 
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
