@@ -218,7 +218,9 @@ def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output
 
         # Companion mean-energy bars for quick model comparison.
         bar_positions = range(len(models))
-        bars = bar_ax.bar(bar_positions, mean_values, color=colors, alpha=0.8)
+        bars = bar_ax.bar(
+            bar_positions, mean_values, color=colors, alpha=0.8, width=0.55
+        )
         bar_ax.set_xticks(list(bar_positions))
         bar_ax.set_xticklabels(models, rotation=20, ha="right")
         bar_ax.set_ylabel("Mean energy")
@@ -231,7 +233,13 @@ def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output
                     color=bar.get_facecolor(), label=f"{model} (mean={mean_val:.2f})"
                 )
             )
-        bar_ax.legend(handles=bar_handles, frameon=False)
+        bar_ax.legend(
+            handles=bar_handles,
+            frameon=False,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.3),
+            ncol=2,
+        )
 
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
