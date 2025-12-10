@@ -132,6 +132,26 @@ def compute_energy_distributions(
     return results
 
 
+def _clip_distributions_to_mean(
+    distributions: Dict[str, Dict[str, List[float]]]
+) -> tuple[Dict[str, Dict[str, List[float]]], Dict[str, Dict[str, float]]]:
+    """Clamp per-model energies to their mean and record the original means."""
+
+    clipped: Dict[str, Dict[str, List[float]]] = {}
+    means: Dict[str, Dict[str, float]] = {}
+    for dataset, models in distributions.items():
+        clipped[dataset] = {}
+        means[dataset] = {}
+        for model, values in models.items():
+            t_values = torch.tensor(values)
+            mean_val = float(t_values.mean()) if t_values.numel() else 0.0
+            means[dataset][model] = mean_val
+            clipped_vals = torch.clamp(t_values, max=mean_val).tolist()
+            clipped[dataset][model] = clipped_vals
+
+    return clipped, means
+
+
 def _compute_global_bins(
     distributions: Dict[str, Dict[str, List[float]]], bin_count: int = 40
 ) -> torch.Tensor:
@@ -168,7 +188,8 @@ def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output
         gridspec_kw={"height_ratios": [3.2, 1.4]},
     )
 
-    bins = _compute_global_bins(distributions)
+    clipped_distributions, mean_lookup = _clip_distributions_to_mean(distributions)
+    bins = _compute_global_bins(clipped_distributions)
     palette = ["#4C72B0", "#55A868", "#C44E52", "#8172B3", "#64B5CD", "#CCB974"]
 
     for col_idx, dataset in enumerate(datasets):
@@ -184,7 +205,8 @@ def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output
         colors: List[str] = []
 
         for j, model in enumerate(models):
-            values = torch.tensor(distributions[dataset][model])
+            values = torch.tensor(clipped_distributions[dataset][model])
+            original_mean = mean_lookup[dataset][model]
             color = palette[j % len(palette)]
             _, _, patches = hist_ax.hist(
                 values.numpy(),
@@ -197,7 +219,7 @@ def plot_energy_diagram(distributions: Dict[str, Dict[str, List[float]]], output
                 label=None,
             )
 
-            mean_val = float(values.mean()) if values.numel() else float("nan")
+            mean_val = original_mean
             handle = patches[0] if patches else None
             if handle:
                 handles.append(handle)
