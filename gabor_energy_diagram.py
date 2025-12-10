@@ -75,16 +75,27 @@ def _compute_energy_distribution_from_paths(
     eval_path: str,
     device: str,
     pca_dim: int = 128,
+    sample_fraction: float = 0.5,
 ) -> List[float]:
     """Return per-sample Gabor energy scores for a train/eval feature pair."""
 
     train = torch.load(train_path, map_location=device)
     evald = torch.load(eval_path, map_location=device)
 
+    def _subsample(tensor: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if not 0.0 < sample_fraction <= 1.0:
+            raise ValueError("sample_fraction must be in (0, 1]")
+        count = max(1, int(round(tensor.shape[0] * sample_fraction)))
+        idx = torch.randperm(tensor.shape[0], device=tensor.device)[:count]
+        return tensor[idx], labels[idx]
+
     train_embeddings = to_tensor(train["embeddings"], device)
     eval_embeddings = to_tensor(evald["embeddings"], device)
     train_labels = to_tensor(train["labels"], device).long()
     eval_labels = to_tensor(evald["labels"], device).long()
+
+    train_embeddings, train_labels = _subsample(train_embeddings, train_labels)
+    eval_embeddings, eval_labels = _subsample(eval_embeddings, eval_labels)
 
     train_feats = compute_gabor_features(train_embeddings, device=device)
     eval_feats = compute_gabor_features(eval_embeddings, device=device)
@@ -110,6 +121,7 @@ def _compute_energy_distribution_from_paths(
 def compute_energy_distributions(
     dataset_model_paths: Dict[str, Dict[str, Mapping[str, str]]],
     device: str,
+    sample_fraction: float,
 ) -> Dict[str, Dict[str, List[float]]]:
     results: Dict[str, Dict[str, List[float]]] = {}
     for dataset, models in dataset_model_paths.items():
@@ -123,14 +135,16 @@ def compute_energy_distributions(
             print(f"Processing model: {model_name}")
             print(f"  Train features: {train_path}")
             print(f"  Eval features:  {eval_path}")
-            energies = _compute_energy_distribution_from_paths(train_path, eval_path, device)
+            print(f"  Sampling fraction: {sample_fraction:.2f} of available embeddings")
+            energies = _compute_energy_distribution_from_paths(
+                train_path, eval_path, device, sample_fraction=sample_fraction
+            )
             results[dataset][model_name] = energies
             print(
-                f"  Gabor Energy:   mean={float(torch.tensor(energies).mean()):.4f},"
+                f"  Gabor Energy:   mean={float(torch.tensor(energies).mean()):.4f},",
                 f" std={float(torch.tensor(energies).std()):.4f}"
             )
     return results
-
 
 def _clip_distributions_to_mean(
     distributions: Dict[str, Dict[str, List[float]]]
@@ -284,13 +298,21 @@ def main() -> None:
         help="Path to save the bar chart PNG",
     )
     parser.add_argument("--device", default="cpu", help="Device to run scoring on (cpu or cuda)")
+    parser.add_argument(
+        "--sample-fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of embeddings to sample at random (per split) when computing energy",
+    )
     args = parser.parse_args()
 
     selected = {k: v for k, v in DEFAULT_DATASET_MODEL_PATHS.items() if k in args.dataset}
     if not selected:
         raise ValueError("No datasets selected. Check the --dataset argument.")
 
-    scores = compute_energy_distributions(selected, device=args.device)
+    scores = compute_energy_distributions(
+        selected, device=args.device, sample_fraction=args.sample_fraction
+    )
     plot_energy_diagram(scores, args.output)
 
 
