@@ -60,6 +60,12 @@ logits on the evaluation split. This aligns the metric with the code in
 `gabor_eng.py`, where the meaningful signal comes from the discriminative power
 of the Gabor responses rather than simply pooling their squared amplitudes.
 
+Interpretation tips for the Gabor energy diagrams (how to read dense,
+overlapping bars and relate them to accuracy) live in
+`gabor_energy_analysis.md` alongside the plotting utility
+`gabor_energy_diagram.py`. Start there if you are looking for narrative
+guidance on which models the histograms indicate as texture-rich.
+
 ### MSCI for single-modality embeddings
 
 In addition to the Gabor/Fisher metrics, the scoring pipeline can now
