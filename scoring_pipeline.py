@@ -458,6 +458,7 @@ def compute_msci_single_modality(
     label_column: str | None = "label",
     magnifications: Sequence[Any] | None = None,
     use_labels: bool = True,
+    allow_single_magnification: bool = False,
 ) -> MSCIResult:
     """Compute single-modality MSCI by comparing magnification means per region.
 
@@ -466,7 +467,10 @@ def compute_msci_single_modality(
     derived from the training split.  If labels are unavailable (for example
     when only raw embeddings are supplied) the metric falls back to using a
     region-wise centroid computed from all available magnifications so that MSCI
-    can still quantify cross-scale consistency.
+    can still quantify cross-scale consistency.  Set
+    ``allow_single_magnification`` to ``True`` to reuse the same formulation on
+    single-scale manifests by treating individual patch vectors as the samples
+    whose variance is measured against the region prototype.
     """
 
     if "embeddings" not in eval_features:
@@ -621,6 +625,8 @@ def compute_msci_single_modality(
             )
             use_label_prototypes = False
 
+    single_magnification_mode = False
+
     if magnifications is not None:
         requested: list[int] = []
         for mag in magnifications:
@@ -643,7 +649,10 @@ def compute_msci_single_modality(
         requested_set = set(requested)
 
     if len(requested_set) < 2:
-        raise ValueError("MSCI requires at least two magnification levels")
+        if allow_single_magnification and requested_set:
+            single_magnification_mode = True
+        else:
+            raise ValueError("MSCI requires at least two magnification levels")
 
     coverage_counts: Dict[int, int] = {mag: 0 for mag in requested_set}
     per_region_variances: list[float] = []
@@ -654,7 +663,7 @@ def compute_msci_single_modality(
 
     for region, info in region_embeddings.items():
         mag_dict = info.get("magnifications", {})
-        if magnifications is not None:
+        if magnifications is not None and not single_magnification_mode:
             for mag in requested_set:
                 if mag not in mag_dict:
                     coverage_counts[mag] += 1
@@ -663,8 +672,15 @@ def compute_msci_single_modality(
             mag for mag in sorted(mag_dict) if (not requested_set or mag in requested_set)
         ]
 
-        if len(available_for_region) < 2:
-            continue
+        if single_magnification_mode:
+            vectors = [
+                vec for mag in available_for_region for vec in mag_dict.get(mag, [])
+            ]
+            if not vectors:
+                continue
+        else:
+            if len(available_for_region) < 2:
+                continue
 
         prototype: torch.Tensor | None = None
         if use_label_prototypes and info.get("label") in label_prototypes:
@@ -683,16 +699,28 @@ def compute_msci_single_modality(
             continue
 
         sims: list[torch.Tensor] = []
-        for mag in available_for_region:
-            vectors = mag_dict[mag]
-            stacked = torch.stack(vectors, dim=0)
-            mean_vec = stacked.mean(dim=0)
-            norm = torch.norm(mean_vec)
-            if torch.isnan(norm) or float(norm.item()) == 0.0:
-                continue
-            normalised = mean_vec / norm
-            sims.append(torch.dot(normalised, prototype))
+        if single_magnification_mode:
+            for vector in vectors:
+                norm = torch.norm(vector)
+                if torch.isnan(norm) or float(norm.item()) == 0.0:
+                    continue
+                normalised = vector / norm
+                sims.append(torch.dot(normalised, prototype))
+        else:
+            for mag in available_for_region:
+                vectors_mag = mag_dict[mag]
+                stacked = torch.stack(vectors_mag, dim=0)
+                mean_vec = stacked.mean(dim=0)
+                norm = torch.norm(mean_vec)
+                if torch.isnan(norm) or float(norm.item()) == 0.0:
+                    continue
+                normalised = mean_vec / norm
+                sims.append(torch.dot(normalised, prototype))
 
+        if not sims:
+            continue
+        if single_magnification_mode and len(sims) == 1:
+            sims.append(sims[0])
         if len(sims) < 2:
             continue
 
@@ -720,7 +748,7 @@ def compute_msci_single_modality(
             missing_info
         )
 
-    if magnifications is not None:
+    if magnifications is not None and not single_magnification_mode:
         skipped = [mag for mag, count in coverage_counts.items() if count == regions_total]
         if skipped:
             warnings.warn(
@@ -803,6 +831,10 @@ def compute_gabor_scores_from_paths(
             msci_params["label_column"] = msci_config.get("label_column")
         if msci_config.get("magnifications") is not None:
             msci_params["magnifications"] = msci_config.get("magnifications")
+        if msci_config.get("allow_single_magnification") is not None:
+            msci_params["allow_single_magnification"] = _coerce_bool(
+                msci_config.get("allow_single_magnification")
+            )
 
         use_labels_value: Any | None = None
         if "use_labels" in msci_config and msci_config.get("use_labels") is not None:
@@ -931,6 +963,7 @@ def compute_gabor_scores_from_paths(
             label_column=label_column,
             magnifications=msci_params.get("magnifications"),
             use_labels=use_labels_flag,
+            allow_single_magnification=msci_params.get("allow_single_magnification", False),
         )
         scores["msci"] = result.score
         scores["msci_mean_variance"] = result.mean_variance
@@ -1003,7 +1036,7 @@ def compute_scores_for_all_models(
 
 
 def compute_scores_for_all_datasets(
-    dataset_model_paths: Dict[str, Dict[str, Sequence[str]]], device: str = "cpu"
+    dataset_model_paths: Dict[str, Dict[str, Any]], device: str = "cpu"
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     dataset_results: Dict[str, Dict[str, Dict[str, float]]] = {}
     for dataset, model_paths in dataset_model_paths.items():
@@ -1149,8 +1182,10 @@ def derive_optimal_weights(
             for m in metric_names:
                 entries[model][m] *= metric_signs[m]
 
-    best_tau = -2.0
+    best_tau = float("-inf")
+    best_min_tau = float("-inf")
     best_weights = tuple(float(w) for w in default)
+    best_all_nonneg = False
     for weight_combo in product(search_space, repeat=len(metric_names)):
         taus = []
         for entries in normed.values():
@@ -1171,12 +1206,39 @@ def derive_optimal_weights(
                 if np.isnan(tau):
                     tau = -2.0
             taus.append(tau)
-        mean_tau = float(np.mean(taus)) if taus else -2.0
-        if mean_tau > best_tau:
+        if not taus:
+            continue
+        mean_tau = float(np.mean(taus))
+        min_tau = float(np.min(taus))
+        all_nonneg = all(tau >= 0.0 for tau in taus)
+
+        candidate_better = False
+        if all_nonneg:
+            if (not best_all_nonneg) or (mean_tau > best_tau) or (
+                np.isclose(mean_tau, best_tau)
+                and min_tau > best_min_tau
+            ):
+                candidate_better = True
+        elif not best_all_nonneg:
+            if (mean_tau > best_tau) or (
+                np.isclose(mean_tau, best_tau) and min_tau > best_min_tau
+            ):
+                candidate_better = True
+
+        if candidate_better:
             best_tau = mean_tau
+            best_min_tau = min_tau
             best_weights = tuple(float(w) for w in weight_combo)
+            best_all_nonneg = all_nonneg
     print(
-        f"Optimized global weights: {best_weights} (tau={best_tau}) for metrics {metric_names}"
+        "Optimized global weights: {} (mean_tau={}, min_tau={}, all_nonnegative={}) "
+        "for metrics {}".format(
+            best_weights,
+            best_tau,
+            best_min_tau,
+            best_all_nonneg,
+            metric_names,
+        )
     )
     signs_tuple = tuple(metric_signs[m] for m in metric_names)
     return best_weights, signs_tuple
@@ -1185,6 +1247,22 @@ def derive_optimal_weights(
 def compute_weighted_kendall_tau(
     scores: Dict[str, float], ground_truth: Dict[str, float]
 ) -> float:
+    r"""Return the weighted Kendall :math:`\tau_w` correlation for ``scores``.
+
+    This function is a thin wrapper around :func:`scipy.stats.weightedtau`,
+    which implements the Shieh (1998) formulation.  With score vectors
+    :math:`x` and :math:`y`, observation weights :math:`w_i` (unity in our
+    usage), and pairwise weights :math:`w_i w_j`, the statistic is computed as
+
+    .. math::
+
+        \tau_w = \frac{P - Q}{\sqrt{(P + Q + T)(P + Q + U)}} ,
+
+    where :math:`P` and :math:`Q` summarise the weighted counts of concordant
+    and discordant pairs, :math:`T` represents ties exclusive to :math:`x`, and
+    :math:`U` represents ties exclusive to :math:`y`.
+    """
+
     common = [m for m in scores if m in ground_truth]
     pred = [scores[m] for m in common]
     truth = [ground_truth[m] for m in common]
@@ -1204,6 +1282,138 @@ def compute_kendall_tau_across_datasets(
             taus[dataset] = tau
             print(f"Kendall tau_w for {dataset}: {tau}")
     return taus
+
+
+def compute_topk_probabilities(
+    all_scores: Dict[str, Dict[str, Dict[str, float]]],
+    ground_truth: Dict[str, Dict[str, float]],
+    *,
+    combined_key: str = "combined",
+    ks: Sequence[int] = (1, 2, 3),
+) -> tuple[Dict[str, Dict[int, float]], Dict[int, float]]:
+    """Return per-dataset and aggregate :math:`Pr(\text{top-}k)` statistics.
+
+    For every dataset that overlaps with ``ground_truth`` this helper ranks
+    models by the specified ``combined_key`` score and checks whether the
+    highest-accuracy ground-truth model appears within the top ``k`` slots of
+    the estimated ranking.  The returned probability is therefore ``1`` when
+    the best reference model is retrieved within the top ``k`` predictions and
+    ``0`` otherwise.  Aggregate values are the mean over all participating
+    datasets for each ``k``.
+    """
+
+    ks = tuple(sorted({int(k) for k in ks if k > 0}))
+    dataset_probs: Dict[str, Dict[int, float]] = {}
+    aggregate: Dict[int, list[float]] = {k: [] for k in ks}
+
+    for dataset, model_scores in all_scores.items():
+        gt = ground_truth.get(dataset)
+        if not gt:
+            continue
+        filtered: list[tuple[str, float]] = []
+        for model, scores in model_scores.items():
+            if model not in gt:
+                continue
+            combined_val = scores.get(combined_key)
+            if combined_val is None:
+                continue
+            filtered.append((model, float(combined_val)))
+        if not filtered:
+            continue
+        # Restrict the ground truth table to overlapping models only.
+        gt_subset = {model: gt[model] for model, _ in filtered}
+        max_acc = max(gt_subset.values())
+        top_models = {
+            model for model, acc in gt_subset.items() if np.isclose(acc, max_acc)
+        }
+        if not top_models:
+            continue
+        ordered = sorted(filtered, key=lambda item: (-item[1], item[0]))
+        probs_for_dataset: Dict[int, float] = {}
+        for k in ks:
+            if k <= 0:
+                continue
+            topk_models = {model for model, _ in ordered[:k]}
+            hit = float(bool(top_models & topk_models))
+            probs_for_dataset[k] = hit
+            aggregate[k].append(hit)
+        if probs_for_dataset:
+            dataset_probs[dataset] = probs_for_dataset
+
+    global_probs = {
+        k: float(np.mean(values)) for k, values in aggregate.items() if values
+    }
+    return dataset_probs, global_probs
+
+
+def report_topk_probabilities(
+    dataset_probs: Dict[str, Dict[int, float]],
+    global_probs: Dict[int, float],
+    metric_names: Sequence[str],
+) -> None:
+    """Display :math:`Pr(\text{top-}k)` results for the combined ranking."""
+
+    label = ", ".join(metric_names)
+    print(f"Pr(topk) for metrics {label} used in combined ranking:")
+    if not dataset_probs:
+        print("  (no datasets with overlapping models)")
+    else:
+        for dataset in sorted(dataset_probs):
+            components = ", ".join(
+                f"top{k}={prob:.3f}" for k, prob in sorted(dataset_probs[dataset].items())
+            )
+            print(f"  {dataset}: {components}")
+    if global_probs:
+        components = ", ".join(
+            f"top{k}={prob:.3f}" for k, prob in sorted(global_probs.items())
+        )
+        print(f"  Aggregate mean: {components}")
+
+
+def report_combined_scores(
+    all_scores: Dict[str, Dict[str, Dict[str, float]]],
+    ground_truth: Dict[str, Dict[str, float]],
+    metric_names: Sequence[str],
+) -> None:
+    """Print combined scores for models contributing to Kendall tau."""
+
+    print(
+        "Combined scores for metrics {} used in Kendall tau calculation:".format(
+            ", ".join(metric_names)
+        )
+    )
+    for dataset, model_scores in all_scores.items():
+        if dataset not in ground_truth:
+            continue
+        print(f"  Dataset: {dataset}")
+        overlaps = []
+        for model, scores in model_scores.items():
+            if model not in ground_truth[dataset]:
+                continue
+            combined_value = scores.get("combined")
+            if combined_value is None:
+                continue
+            metric_parts = []
+            for metric in metric_names:
+                value = scores.get(metric)
+                if value is None:
+                    metric_parts.append(f"{metric}=N/A")
+                else:
+                    metric_parts.append(f"{metric}={value:.6f}")
+            overlaps.append(
+                (
+                    model,
+                    combined_value,
+                    ", ".join(metric_parts),
+                )
+            )
+        if not overlaps:
+            print("    (no overlapping models with ground truth)")
+            continue
+        for model, combined_value, metric_text in sorted(overlaps):
+            print(
+                f"    {model}: combined={combined_value:.6f} ({metric_text})"
+            )
 
 
 if __name__ == "__main__":
@@ -1280,10 +1490,85 @@ if __name__ == "__main__":
                     "magnifications": [5, 10, 20, 40],
                 },
             },
-        }
+        },
+        "CAM": {
+            "uni": {
+                "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/uni_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/uni_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                    "region_column": "patch_id",
+                    "magnification_column": "patch_scale",
+                    "label_column": "label",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "conch": {
+                "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/conch_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/conch_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                    "region_column": "patch_id",
+                    "magnification_column": "patch_scale",
+                    "label_column": "label",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "giga": {
+                "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/giga_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/giga_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                    "region_column": "patch_id",
+                    "magnification_column": "patch_scale",
+                    "label_column": "label",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "phikon": {
+                "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/phikon_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/phikon_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                    "region_column": "patch_id",
+                    "magnification_column": "patch_scale",
+                    "label_column": "label",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+            "virchow": {
+                "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/virchow_train_features.pth",
+                "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/virchow_eval_features.pth",
+                "msci": {
+                    "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                    "region_column": "patch_id",
+                    "magnification_column": "patch_scale",
+                    "label_column": "label",
+                    "magnifications": [5, 10, 20, 40],
+                },
+            },
+        },
     }
     raw_scores = compute_scores_for_all_datasets(dataset_model_paths, device=args.device)
-    ground_truth = {"TCGA": {"uni": 0.94}}
+    ground_truth_tcga = {
+        "TCGA": {
+            "uni": 0.4856,
+            "conch": 0.4916,
+            "giga": 0.5108,
+            "phikon": 0.4675,
+            "virchow": 0.4952,
+        }
+    }
+    ground_truth_cam = {
+        "CAM": {
+            "uni": 0.7656,
+            "conch": 0.7903,
+            "giga": 0.8567,
+            "phikon": 0.8235,
+            "virchow": 0.8698,
+        }
+    }
+    ground_truth = {**ground_truth_tcga, **ground_truth_cam}
     selected_metrics = _validate_metric_selection(args.combine_metrics)
     weights, signs = derive_optimal_weights(
         raw_scores, ground_truth, metrics=selected_metrics
@@ -1291,6 +1576,11 @@ if __name__ == "__main__":
     combined_scores = normalize_and_combine_scores(
         raw_scores, metrics=selected_metrics, weights=weights, signs=signs
     )
+    report_combined_scores(combined_scores, ground_truth, selected_metrics)
+    dataset_topk, global_topk = compute_topk_probabilities(
+        combined_scores, ground_truth
+    )
+    report_topk_probabilities(dataset_topk, global_topk, selected_metrics)
     compute_kendall_tau_across_datasets(combined_scores, ground_truth)
 
     if args.benchmark:

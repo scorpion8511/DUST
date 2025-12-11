@@ -15,6 +15,7 @@ import csv
 import os
 import random
 import sys
+import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
@@ -86,26 +87,49 @@ def _extract_labels(payload: Mapping[str, object]) -> Optional[Sequence[object]]
     return None
 
 
-def _strip_magnification_suffixes(identifier: str) -> str:
+def _strip_magnification_suffixes(identifier: str) -> List[str]:
+    """Return progressively stripped variants with trailing ``*_x`` tokens removed."""
+
     parts = identifier.split("_")
     if len(parts) <= 1:
-        return identifier
+        return []
 
-    base_parts: List[str] = []
-    for part in parts:
-        token = part.strip().lower()
+    variants: List[str] = []
+    working = parts[:]
+
+    while working:
+        last = working[-1]
+        token = last.strip().lower()
         if token.endswith("x"):
             magnitude = token[:-1]
             if magnitude.replace(".", "", 1).isdigit():
+                working = working[:-1]
+                if working:
+                    variant = "_".join(working)
+                    variants.append(variant)
                 continue
-        base_parts.append(part)
+        break
 
-    if not base_parts:
-        return identifier
-    return "_".join(base_parts)
+    return variants
 
 
-def _normalise_identifier_tokens(value: Optional[object]) -> List[str]:
+def _maybe_split_token(candidate: str, separator: str) -> List[str]:
+    if separator not in candidate:
+        return []
+    parts = [part for part in candidate.split(separator) if part]
+    collapsed = "".join(parts)
+    variants = parts[:]
+    if collapsed:
+        variants.append(collapsed)
+    joined = "_".join(parts)
+    if joined:
+        variants.append(joined)
+    return variants
+
+
+def _normalise_identifier_tokens(
+    value: Optional[object], *, allow_partial: bool = True
+) -> List[str]:
     if value is None:
         return []
 
@@ -142,17 +166,41 @@ def _normalise_identifier_tokens(value: Optional[object]) -> List[str]:
             if base and base not in seen:
                 queue.append(base)
 
+        if "::" in candidate:
+            colon_squashed = candidate.replace("::", "_")
+            if colon_squashed and colon_squashed not in seen:
+                queue.append(colon_squashed)
+            colon_slash = candidate.replace("::", "/")
+            if colon_slash and colon_slash not in seen:
+                queue.append(colon_slash)
+            first, _, remainder = candidate.partition("::")
+            if remainder:
+                root_first, ext_first = os.path.splitext(first)
+                if ext_first and root_first:
+                    alt = f"{root_first}::{remainder}"
+                    if alt not in seen:
+                        queue.append(alt)
+
         root, ext = os.path.splitext(candidate)
         if ext and root and root not in seen:
             queue.append(root)
 
-        stripped = _strip_magnification_suffixes(root if ext and root else candidate)
-        if stripped and stripped not in seen:
-            queue.append(stripped)
+        stripped_variants = _strip_magnification_suffixes(
+            root if ext and root else candidate
+        )
+        for stripped in stripped_variants:
+            if stripped and stripped not in seen:
+                queue.append(stripped)
 
         lowered = candidate.lower()
         if lowered not in seen:
             queue.append(lowered)
+
+        if allow_partial:
+            for separator in ("::", "|", "-", ":"):
+                for variant in _maybe_split_token(candidate, separator):
+                    if variant not in seen:
+                        queue.append(variant)
 
     return tokens
 
@@ -161,7 +209,10 @@ def _build_sample_token_index(samples: Sequence[Sample]) -> Dict[str, List[int]]
     token_map: Dict[str, List[int]] = {}
     for idx, sample in enumerate(samples):
         sample_tokens: Set[str] = set()
-        for value in (sample.identifier, sample.csv_image, sample.image_path):
+        if sample.identifier is not None:
+            for token in _normalise_identifier_tokens(sample.identifier, allow_partial=False):
+                sample_tokens.add(token)
+        for value in (sample.csv_image, sample.image_path):
             for token in _normalise_identifier_tokens(value):
                 sample_tokens.add(token)
         for token in sample_tokens:
@@ -169,7 +220,54 @@ def _build_sample_token_index(samples: Sequence[Sample]) -> Dict[str, List[int]]
     return token_map
 
 
-def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedFeatureSet) -> None:
+def _select_consistent_candidates(
+    candidate_indices: Iterable[int], samples: Sequence[Sample]
+) -> Tuple[List[int], Optional[int]]:
+    """Return sample indices sharing label and provenance information.
+
+    The alignment metadata for some cached feature sets only records a partial
+    identifier (e.g. just the patch identifier without the slide component).
+    When we fall back to token based matching we may encounter several manifest
+    rows that share the same token but correspond to different slides or even
+    different labels.  Instead of propagating the ambiguity, we only accept
+    matches where every candidate sample agrees on the label and refers to the
+    same underlying asset (identifier and CSV image column when available).
+    """
+
+    indices: List[int] = []
+    label_value: Optional[int] = None
+    identifiers: Set[str] = set()
+    csv_entries: Set[str] = set()
+
+    for idx in candidate_indices:
+        sample = samples[idx]
+        sample_label = sample.label
+        if label_value is None:
+            label_value = sample_label
+        elif sample_label != label_value:
+            return [], None
+
+        if sample.identifier:
+            identifiers.add(sample.identifier)
+            if len(identifiers) > 1:
+                return [], None
+
+        if sample.csv_image:
+            csv_entries.add(sample.csv_image)
+            if len(csv_entries) > 1:
+                return [], None
+
+        indices.append(idx)
+
+    return indices, label_value
+
+
+def assign_precomputed_indices(
+    samples: Sequence[Sample],
+    features: PrecomputedFeatureSet,
+    *,
+    skip_unmatched: bool = False,
+) -> None:
     if features.features.shape[0] == len(samples):
         return
 
@@ -203,7 +301,15 @@ def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedF
         )
 
     token_index = _build_sample_token_index(samples)
+    identifier_index: Dict[str, List[int]] = {}
+    for idx, sample in enumerate(samples):
+        if sample.identifier is None:
+            continue
+        for token in _normalise_identifier_tokens(sample.identifier, allow_partial=False):
+            identifier_index.setdefault(token, []).append(idx)
     unmatched_samples = {idx for idx in range(len(samples)) if samples[idx].feature_index is None}
+
+    feature_label_constraints: Dict[int, int] = {}
 
     for feature_idx, region_id in enumerate(region_ids):
         if not unmatched_samples:
@@ -215,13 +321,64 @@ def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedF
             raw_ids = [raw_ids]
         matched = False
         for raw_id in raw_ids:
-            for token in _normalise_identifier_tokens(raw_id):
-                for sample_idx in token_index.get(token, []):
-                    if sample_idx not in unmatched_samples:
-                        continue
+            identifier_tokens = _normalise_identifier_tokens(raw_id, allow_partial=False)
+            for token in identifier_tokens:
+                if feature_idx in feature_label_constraints:
+                    expected_label = feature_label_constraints[feature_idx]
+                else:
+                    expected_label = None
+                raw_candidates = [
+                    idx
+                    for idx in identifier_index.get(token, [])
+                    if idx in unmatched_samples
+                ]
+                candidates, label_value = _select_consistent_candidates(
+                    raw_candidates, samples
+                )
+                if not candidates:
+                    continue
+                if expected_label is not None and label_value is not None and label_value != expected_label:
+                    continue
+                for sample_idx in candidates:
                     samples[sample_idx].feature_index = feature_idx
                     unmatched_samples.remove(sample_idx)
-                    matched = True
+                if label_value is not None:
+                    feature_label_constraints[feature_idx] = label_value
+                matched = True
+            if matched:
+                break
+            for token in _normalise_identifier_tokens(raw_id):
+                if feature_idx in feature_label_constraints:
+                    expected_label = feature_label_constraints[feature_idx]
+                else:
+                    expected_label = None
+                raw_candidates = [
+                    idx for idx in token_index.get(token, []) if idx in unmatched_samples
+                ]
+                if not raw_candidates:
+                    continue
+                # Require every candidate reached via a fuzzy token to share the
+                # same manifest identifier.  This prevents short tokens such as
+                # "patch_1" from aligning samples that originate from different
+                # slides.
+                identifiers = {
+                    samples[idx].identifier for idx in raw_candidates if samples[idx].identifier
+                }
+                if len(identifiers) > 1:
+                    continue
+                candidates, label_value = _select_consistent_candidates(
+                    raw_candidates, samples
+                )
+                if not candidates:
+                    continue
+                if expected_label is not None and label_value is not None and label_value != expected_label:
+                    continue
+                for sample_idx in candidates:
+                    samples[sample_idx].feature_index = feature_idx
+                    unmatched_samples.remove(sample_idx)
+                if label_value is not None:
+                    feature_label_constraints[feature_idx] = label_value
+                matched = True
         if matched:
             continue
 
@@ -231,6 +388,20 @@ def assign_precomputed_indices(samples: Sequence[Sample], features: PrecomputedF
             sample = samples[sample_idx]
             candidate = sample.identifier or sample.csv_image or os.path.basename(sample.image_path)
             examples.append(str(candidate))
+        if skip_unmatched:
+            message = "Skipping manifest rows without cached feature matches"
+            if examples:
+                message += f": {', '.join(examples)}"
+            warnings.warn(message)
+            if isinstance(samples, list):
+                for sample_idx in sorted(unmatched_samples, reverse=True):
+                    del samples[sample_idx]
+                for new_idx, sample in enumerate(samples):
+                    sample.index = new_idx
+            else:
+                for sample_idx in sorted(unmatched_samples):
+                    samples[sample_idx].feature_index = None
+            return
         message = (
             "Failed to align the manifest rows with the cached features. "
             "Ensure --id-column matches the identifiers used during feature extraction or regenerate the cache."
@@ -312,6 +483,45 @@ def _maybe_login(token: Optional[str]) -> None:
         raise RuntimeError("Failed to authenticate with Hugging Face.") from exc
 
 
+def _combine_identifier(row: Mapping[str, str], columns: Sequence[str]) -> Optional[str]:
+    def _normalise_part(token: str, column: str) -> str:
+        text = token.strip()
+        if not text:
+            return ""
+
+        text = os.path.basename(text)
+
+        if "slide" in column.lower() and "." not in text:
+            stem_lower = text.lower()
+            candidate_matches: List[str] = []
+            for other_value in row.values():
+                if not other_value:
+                    continue
+                other_text = os.path.basename(str(other_value).strip())
+                if not other_text or "." not in other_text:
+                    continue
+                if other_text.lower().startswith(stem_lower):
+                    candidate_matches.append(other_text)
+            if candidate_matches:
+                text = min(candidate_matches, key=len)
+
+        return text
+
+    parts: List[str] = []
+    for column in columns:
+        value = row.get(column)
+        if value is None:
+            continue
+        token = str(value).strip()
+        if token:
+            normalised = _normalise_part(token, column)
+            if normalised:
+                parts.append(normalised)
+    if not parts:
+        return None
+    return "::".join(parts)
+
+
 def read_manifest(
     csv_path: str,
     image_root: Optional[str],
@@ -323,6 +533,7 @@ def read_manifest(
     filter_values: Optional[Sequence[str]],
     *,
     verify_images: bool = True,
+    composite_id_columns: Optional[Sequence[str]] = None,
 ) -> Tuple[List[Sample], Dict[int, str]]:
     """Parse the manifest CSV and return typed samples plus the label map.
 
@@ -340,8 +551,37 @@ def read_manifest(
             raise ValueError("CSV must contain a class label column")
         if filter_column is not None and filter_column not in reader.fieldnames:
             raise ValueError(f"Unknown filter column: {filter_column}")
+        if id_column and composite_id_columns:
+            raise ValueError("--id-column and --id-columns cannot be used together")
+
         if id_column is not None and id_column not in reader.fieldnames:
             raise ValueError(f"Unknown id column: {id_column}")
+
+        if composite_id_columns:
+            missing = [column for column in composite_id_columns if column not in reader.fieldnames]
+            if missing:
+                raise ValueError(
+                    "Unknown id columns for composite identifier: "
+                    + ", ".join(missing)
+                )
+
+        auto_composite: Optional[Tuple[str, str]] = None
+        if not id_column and not composite_id_columns:
+            candidate_pairs: Sequence[Tuple[str, str]] = (
+                ("slide", "patch"),
+                ("slide_id", "patch_id"),
+                ("slide", "patch_id"),
+                ("slide_id", "patch"),
+            )
+            for first, second in candidate_pairs:
+                if first in reader.fieldnames and second in reader.fieldnames:
+                    auto_composite = (first, second)
+                    break
+            if auto_composite:
+                print(
+                    "No --id-column supplied; combining columns "
+                    f"{auto_composite[0]!r} and {auto_composite[1]!r} to build unique identifiers."
+                )
 
         for row in reader:
             if filter_column and filter_values and row.get(filter_column) not in filter_values:
@@ -353,11 +593,26 @@ def read_manifest(
             if verify_images and not os.path.exists(image_path):
                 raise FileNotFoundError(f"Missing image: {image_path}")
             text = row[text_column]
-            label_name = row[label_column]
+            raw_label = row[label_column]
+            if raw_label is None:
+                raise ValueError(
+                    f"Missing label value in column {label_column!r} for row {len(samples)}"
+                )
+            label_name = str(raw_label).strip()
+            if not label_name:
+                raise ValueError(
+                    f"Empty label value in column {label_column!r} for row {len(samples)}"
+                )
             if label_name not in label_to_index:
                 label_to_index[label_name] = len(label_to_index)
             label_idx = label_to_index[label_name]
-            identifier = row[id_column].strip() if id_column else None
+            identifier: Optional[str] = None
+            if composite_id_columns:
+                identifier = _combine_identifier(row, composite_id_columns)
+            elif id_column:
+                identifier = row[id_column].strip()
+            elif auto_composite:
+                identifier = _combine_identifier(row, auto_composite)
             if identifier == "":
                 identifier = None
             samples.append(
@@ -402,6 +657,66 @@ def split_samples(
         return [samples[i] for i in idxs]
 
     return gather(train_idx), gather(val_idx), gather(test_idx)
+
+
+def split_samples_by_feature(
+    samples: Sequence[Sample],
+    train_ratio: float,
+    val_ratio: float,
+    seed: int,
+) -> Tuple[List[Sample], List[Sample], List[Sample]]:
+    """Split samples while keeping cached feature vectors in a single subset."""
+
+    feature_groups: Dict[int, List[Sample]] = {}
+    for sample in samples:
+        if sample.feature_index is None:
+            raise ValueError(
+                "split_samples_by_feature requires every sample to define feature_index"
+            )
+        feature_groups.setdefault(sample.feature_index, []).append(sample)
+
+    for feature_idx, group in feature_groups.items():
+        labels = {member.label for member in group}
+        if len(labels) > 1:
+            raise ValueError(
+                "Samples aligned to cached feature index "
+                f"{feature_idx} span multiple labels; check the manifest/feature mapping."
+            )
+
+    representatives = [group[0] for group in feature_groups.values()]
+    train_reps, val_reps, test_reps = split_samples(representatives, train_ratio, val_ratio, seed)
+
+    def expand(reps: Sequence[Sample]) -> List[Sample]:
+        expanded: List[Sample] = []
+        for rep in reps:
+            assert rep.feature_index is not None
+            expanded.extend(feature_groups[rep.feature_index])
+        return expanded
+
+    return expand(train_reps), expand(val_reps), expand(test_reps)
+
+
+def _validate_label_coverage(samples: Sequence[Sample], label_map: Mapping[int, str]) -> None:
+    """Ensure that cached feature alignment retains every class from the manifest."""
+
+    if not samples:
+        raise ValueError("No samples remain after aligning with cached features")
+
+    present = {sample.label for sample in samples}
+    if len(label_map) <= 1 or len(present) > 1:
+        return
+
+    missing = sorted(set(label_map.keys()) - present)
+    if not missing:
+        return
+
+    missing_labels = ", ".join(label_map[idx] for idx in missing if idx in label_map)
+    present_label = label_map[next(iter(present))]
+    raise ValueError(
+        "Cached feature alignment only retained samples for label "
+        f"{present_label!r}. Missing labels: {missing_labels}. "
+        "Verify the identifier columns or regenerate the cached features."
+    )
 
 
 def encode_with_plip(
@@ -873,6 +1188,15 @@ def main() -> None:
             "Optional CSV column whose values align with identifiers stored in precomputed feature metadata."
         ),
     )
+    parser.add_argument(
+        "--id-columns",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of CSV columns whose values are concatenated to form unique identifiers when aligning"
+            " precomputed features (for example: --id-columns slide_id patch_id)."
+        ),
+    )
     parser.add_argument("--filter-column", type=str, default=None, help="Optional column used to filter rows")
     parser.add_argument("--filter-values", nargs="*", default=None, help="Values from --filter-column to keep")
     parser.add_argument("--batch-size", type=int, default=32)
@@ -883,6 +1207,13 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-normalize", action="store_true", help="Disable L2 normalisation of embeddings before classification")
+    parser.add_argument(
+        "--skip-unmatched",
+        action="store_true",
+        help=(
+            "Silently drop manifest rows that cannot be aligned with cached feature identifiers instead of raising an error."
+        ),
+    )
     parser.add_argument("--musk-checkpoint", type=str, default="hf_hub:xiangjx/musk")
     parser.add_argument("--musk-precision", choices=["fp16", "fp32"], default="fp16")
     parser.add_argument("--text-tokenizer", type=str, default=None, help="SentencePiece tokenizer path for MUSK")
@@ -966,12 +1297,11 @@ def main() -> None:
         filter_column=args.filter_column,
         filter_values=args.filter_values,
         verify_images=args.features is None,
-    )
-    train_samples, val_samples, test_samples = split_samples(
-        samples, args.train_ratio, args.val_ratio, args.seed
+        composite_id_columns=args.id_columns,
     )
 
     precomputed: Optional[PrecomputedFeatureSet] = None
+    group_by_feature = False
     if args.features:
         precomputed = load_precomputed_feature_set(
             args.features, normalize=not args.no_normalize
@@ -982,13 +1312,28 @@ def main() -> None:
             )
 
         if precomputed.features.shape[0] != len(samples):
-            assign_precomputed_indices(samples, precomputed)
+            assign_precomputed_indices(
+                samples,
+                precomputed,
+                skip_unmatched=args.skip_unmatched,
+            )
+            _validate_label_coverage(samples, label_map)
+            group_by_feature = True
             print(
                 "Using precomputed features from "
                 f"{args.features} (aligned {len(samples)} manifest rows to {precomputed.features.shape[0]} cached vectors)"
             )
         else:
             print(f"Using precomputed features from {args.features}")
+
+    if group_by_feature:
+        train_samples, val_samples, test_samples = split_samples_by_feature(
+            samples, args.train_ratio, args.val_ratio, args.seed
+        )
+    else:
+        train_samples, val_samples, test_samples = split_samples(
+            samples, args.train_ratio, args.val_ratio, args.seed
+        )
 
     encoder_kwargs = dict(
         model_name=args.model,
