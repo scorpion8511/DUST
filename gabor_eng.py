@@ -168,6 +168,16 @@ def compute_gabor_scores(
     pca_dim: Optional[int] = 128,
     device: str = "cpu",
 ) -> dict:
+    """Compute training-free Gabor energy and Fisher scores.
+
+    The Gabor responses are standardised (subtract the train-set mean and divide
+    by the train-set standard deviation) before PCA/LDA so that the downstream
+    classifier and log-sum-exp energy are driven by relative texture contrast
+    rather than absolute response magnitude. This normalisation makes energy
+    scores comparable across models and magnifications, letting the final
+    log-sum-exp aggregate reflect how discriminative the filtered features are
+    instead of how large the raw activations happen to be.
+    """
     train_embeddings = to_tensor(train_embeddings, device)
     eval_embeddings = to_tensor(eval_embeddings, device)
     train_labels = to_tensor(train_labels, device).long()
