@@ -107,8 +107,27 @@ def load_manifest(
     else:
         df = df.copy()
 
+    def _resolve_path(p: str) -> str:
+        """Resolve a manifest path, respecting already-absolute entries.
+
+        The manifest occasionally mixes absolute and relative paths. When an
+        image_root is provided we should only prepend it if the manifest entry
+        is not already an absolute path that exists. If both the absolute
+        manifest entry and the image_root-prefixed version are missing, we fall
+        back to the original value so the missing-file report surfaces what the
+        user actually supplied.
+        """
+
+        if os.path.isabs(p) and os.path.exists(p):
+            return p
+        if image_root:
+            candidate = os.path.join(image_root, p)
+            if os.path.exists(candidate):
+                return candidate
+        return p
+
     if image_root:
-        df[image_column] = df[image_column].map(lambda p: os.path.join(image_root, p))
+        df[image_column] = df[image_column].map(_resolve_path)
 
     missing_files = [p for p in df[image_column].tolist() if not os.path.exists(p)]
     if missing_files:
