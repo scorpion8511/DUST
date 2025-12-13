@@ -561,6 +561,29 @@ def _compute_weighted_kendall_tau(
     return float(tau)
 
 
+def _report_combined_ranking(
+    dataset: str,
+    scores: Mapping[str, Mapping[str, float]],
+    *,
+    key: str,
+) -> None:
+    """Print the combined score ordering used for Kendall tau."""
+
+    entries: list[tuple[str, float]] = []
+    for name, payload in scores.items():
+        try:
+            entries.append((name, float(payload[key])))
+        except (TypeError, KeyError, ValueError):
+            continue
+
+    if entries:
+        print(
+            f"Combined ranking for {dataset} using '{key}' (used for Kendall tau):"
+        )
+        for name, value in sorted(entries, key=lambda kv: kv[1], reverse=True):
+            print(f"  {name}: {value:.6f}")
+
+
 def _compute_topk_probabilities(
     dataset_scores: Dict[str, Dict[str, Dict[str, float]]],
     ground_truth: Dict[str, Dict[str, float]],
@@ -1007,6 +1030,8 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                 descriptor=descriptor,
             )
 
+        combined_key = combined_label if joint_optimisation is not None else None
+
         for dataset in requested_datasets:
             gt = ground_truth.get(dataset)
             if not gt:
@@ -1025,6 +1050,11 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                     stacklevel=2,
                 )
                 continue
+
+            if combined_key is not None:
+                _report_combined_ranking(
+                    dataset, dataset_scores, key=combined_key
+                )
 
             msci_tau = _compute_weighted_kendall_tau(
                 {name: scores["msci"] for name, scores in dataset_scores.items()}, gt

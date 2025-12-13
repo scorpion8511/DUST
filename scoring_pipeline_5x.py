@@ -154,7 +154,9 @@ def main() -> None:
         raw_scores, metrics=selected_metrics, weights=weights, signs=signs
     )
     report_combined_scores(combined_scores, ground_truth, selected_metrics)
-    compute_kendall_tau_across_datasets(combined_scores, ground_truth)
+    compute_kendall_tau_across_datasets(
+        combined_scores, ground_truth, verbose=True
+    )
 
     if args.benchmark:
         print("Benchmark:", benchmark_runtime())

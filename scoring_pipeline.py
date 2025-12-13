@@ -1342,11 +1342,20 @@ def compute_weighted_kendall_tau(
 def compute_kendall_tau_across_datasets(
     all_scores: Dict[str, Dict[str, Dict[str, float]]],
     ground_truth: Dict[str, Dict[str, float]],
+    *,
+    verbose: bool = False,
 ) -> Dict[str, float]:
     taus: Dict[str, float] = {}
     for dataset, model_scores in all_scores.items():
         if dataset in ground_truth:
             preds = {m: s["combined"] for m, s in model_scores.items()}
+            if verbose and preds:
+                print(f"Combined ranking for {dataset} (used for Kendall tau):")
+                for name, value in sorted(
+                    preds.items(), key=lambda kv: kv[1], reverse=True
+                ):
+                    print(f"  {name}: {value:.6f}")
+
             tau = compute_weighted_kendall_tau(preds, ground_truth[dataset])
             taus[dataset] = tau
             print(f"Kendall tau_w for {dataset}: {tau}")
@@ -1665,7 +1674,9 @@ if __name__ == "__main__":
         combined_scores, ground_truth
     )
     report_topk_probabilities(dataset_topk, global_topk, selected_metrics)
-    compute_kendall_tau_across_datasets(combined_scores, ground_truth)
+    compute_kendall_tau_across_datasets(
+        combined_scores, ground_truth, verbose=True
+    )
 
     if args.benchmark:
         print("Benchmark:", benchmark_runtime())
