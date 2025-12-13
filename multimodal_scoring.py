@@ -246,12 +246,67 @@ def _validate_alignment(
             if patch_name is None:
                 continue
             candidates = _candidate_region_tokens(str(region_id), csv_mapping if isinstance(csv_mapping, Mapping) else {})
-            if not any(token and token in patch_name for token in candidates):
-                warnings.warn(
-                    f"Patch '{patch_name}' (magnification {mag}) does not appear to match region '{region_id}'.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+        if not any(token and token in patch_name for token in candidates):
+            warnings.warn(
+                f"Patch '{patch_name}' (magnification {mag}) does not appear to match region '{region_id}'.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+
+def _subsample_multimodal_embeddings(
+    image_embeddings: Mapping[int, torch.Tensor],
+    text_embeddings: torch.Tensor,
+    metadata: Mapping[str, object] | None,
+    *,
+    fraction: float = 0.5,
+    rng: torch.Generator | None = None,
+) -> tuple[Mapping[int, torch.Tensor], torch.Tensor, Mapping[str, object] | None]:
+    """Subsample multimodal embeddings while preserving alignment across magnifications."""
+
+    if not (0.0 < fraction < 1.0):
+        return image_embeddings, text_embeddings, metadata
+
+    total = text_embeddings.shape[0]
+    if total <= 1:
+        return image_embeddings, text_embeddings, metadata
+
+    for mag, tensor in image_embeddings.items():
+        if tensor.shape[0] != total:
+            warnings.warn(
+                "Skipping subsampling because image/text embedding counts differ across magnifications.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return image_embeddings, text_embeddings, metadata
+
+    keep = max(1, int(round(total * fraction)))
+    if keep >= total:
+        return image_embeddings, text_embeddings, metadata
+
+    indices = torch.randperm(total, generator=rng)[:keep]
+    subset_images = {mag: tensor[indices] for mag, tensor in image_embeddings.items()}
+    subset_text = text_embeddings[indices]
+
+    subset_metadata: Mapping[str, object] | None = None
+    if metadata:
+        subset_metadata = dict(metadata)
+        idx_list = indices.tolist()
+        for key in ("region_ids", "labels"):
+            values = metadata.get(key)
+            if isinstance(values, Sequence) and len(values) == total:
+                subset_metadata[key] = [values[i] for i in idx_list]
+
+        patches = metadata.get("patches") if isinstance(metadata, Mapping) else None
+        if isinstance(patches, Mapping):
+            new_patches: dict[int, list[object]] = {}
+            for mag, values in patches.items():
+                if isinstance(values, Sequence) and len(values) == total:
+                    new_patches[int(mag)] = [values[i] for i in idx_list]
+            subset_metadata["patches"] = new_patches
+
+    print(f"Subsampled {keep}/{total} rows (~{keep/total:.1%}) for multimodal metrics.")
+    return subset_images, subset_text, subset_metadata
 
 
 def _max_variance(num_magnifications: int) -> float:
@@ -748,6 +803,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     aggregated_results: Dict[str, Dict[str, object]] = {}
     json_payload: Dict[str, Dict[str, object]] = {}
     collected_scores: Dict[str, Dict[str, Dict[str, float]]] = {}
+    rng = torch.Generator(device="cpu")
 
     requested_datasets = _normalise_dataset_argument(args.dataset)
     multi_dataset = len(requested_datasets) > 1
@@ -806,6 +862,18 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
                 metadata,
                 stored_magnifications,
             ) = load_multimodal_embeddings(feature_path, device)
+
+            (
+                image_embeddings,
+                text_embeddings,
+                metadata,
+            ) = _subsample_multimodal_embeddings(
+                image_embeddings,
+                text_embeddings,
+                metadata,
+                fraction=args.sample_fraction,
+                rng=rng,
+            )
 
             _validate_alignment(metadata, image_embeddings, text_embeddings)
 
@@ -1031,6 +1099,12 @@ def build_argparser() -> argparse.ArgumentParser:
         type=str,
         default="cpu",
         help="Device for computation (e.g. 'cpu', 'cuda:0').",
+    )
+    parser.add_argument(
+        "--sample-fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of embeddings to sample at random for scoring (0 < f <= 1).",
     )
     parser.add_argument(
         "--magnifications",

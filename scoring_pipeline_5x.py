@@ -111,11 +111,21 @@ def main() -> None:
         default=list(AVAILABLE_METRICS),
         help="Metrics to include when forming the combined score",
     )
+    parser.add_argument(
+        "--sample-fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of embeddings to sample at random for scoring (0 < f <= 1)",
+    )
     args = parser.parse_args()
 
     dataset_model_paths = build_5x_dataset_config()
 
-    raw_scores = compute_scores_for_all_datasets(dataset_model_paths, device=args.device)
+    raw_scores = compute_scores_for_all_datasets(
+        dataset_model_paths,
+        device=args.device,
+        sample_fraction=args.sample_fraction,
+    )
     ground_truth_tcga = {
         "TCGA": {
             "uni": 0.4856,

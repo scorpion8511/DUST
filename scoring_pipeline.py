@@ -776,14 +776,68 @@ def compute_msci_single_modality(
     )
 
 
+def _subsample_feature_payload(
+    payload: Mapping[str, Any],
+    *,
+    fraction: float = 0.5,
+    rng: torch.Generator | None = None,
+) -> Mapping[str, Any]:
+    """Randomly subsample a feature payload along the first dimension.
+
+    The embeddings (and any aligned arrays such as labels or region IDs) are
+    reduced to roughly ``fraction`` of their rows while keeping alignment
+    intact. A fraction outside ``(0, 1)`` leaves the payload unchanged.
+    """
+
+    if not (0.0 < fraction < 1.0):
+        return payload
+
+    embeddings = payload.get("embeddings")
+    if embeddings is None:
+        return payload
+
+    tensor = _to_tensor(embeddings)
+    total = tensor.shape[0]
+    if total <= 1:
+        return payload
+
+    keep = max(1, int(round(total * fraction)))
+    if keep >= total:
+        return payload
+
+    indices = torch.randperm(total, generator=rng)[:keep]
+    subset: Dict[str, Any] = dict(payload)
+    subset["embeddings"] = tensor[indices]
+
+    aligned_keys = ("labels", "region_ids", "magnifications", "row_indices")
+    for key in aligned_keys:
+        value = payload.get(key)
+        if isinstance(value, torch.Tensor) and value.shape[0] == total:
+            subset[key] = value[indices]
+        elif isinstance(value, Sequence) and len(value) == total:
+            idx_list = indices.tolist()
+            subset[key] = [value[i] for i in idx_list]
+
+    print(
+        f"Subsampled {keep}/{total} rows (~{keep/total:.1%}) from payload for scoring."
+    )
+    return subset
+
+
 def compute_gabor_scores_from_paths(
     train_features_path: str,
     eval_features_path: str,
     device: str = "cpu",
     msci_config: Mapping[str, Any] | None = None,
+    sample_fraction: float = 0.5,
+    rng: torch.Generator | None = None,
 ) -> Dict[str, Any]:
-    train = torch.load(train_features_path, map_location=device)
-    evald = torch.load(eval_features_path, map_location=device)
+    train_raw = torch.load(train_features_path, map_location=device)
+    eval_raw = torch.load(eval_features_path, map_location=device)
+
+    train = _subsample_feature_payload(train_raw, fraction=sample_fraction, rng=rng)
+    evald = _subsample_feature_payload(eval_raw, fraction=sample_fraction, rng=rng)
+
     scores: Dict[str, Any] = compute_gabor_scores(
         train["embeddings"],
         train["labels"],
@@ -1020,7 +1074,11 @@ def _extract_paths_config(
 
 
 def compute_scores_for_all_models(
-    model_paths: Dict[str, Any], device: str = "cpu"
+    model_paths: Dict[str, Any],
+    *,
+    device: str = "cpu",
+    sample_fraction: float = 0.5,
+    rng: torch.Generator | None = None,
 ) -> Dict[str, Dict[str, Any]]:
     results: Dict[str, Dict[str, Any]] = {}
     for model_name, paths in model_paths.items():
@@ -1029,19 +1087,30 @@ def compute_scores_for_all_models(
         print(f"Training features: {train_path}")
         print(f"Evaluation features: {eval_path}")
         scores = compute_gabor_scores_from_paths(
-            train_path, eval_path, device=device, msci_config=msci_cfg
+            train_path,
+            eval_path,
+            device=device,
+            msci_config=msci_cfg,
+            sample_fraction=sample_fraction,
+            rng=rng,
         )
         results[model_name] = scores
     return results
 
 
 def compute_scores_for_all_datasets(
-    dataset_model_paths: Dict[str, Dict[str, Any]], device: str = "cpu"
+    dataset_model_paths: Dict[str, Dict[str, Any]],
+    *,
+    device: str = "cpu",
+    sample_fraction: float = 0.5,
+    rng: torch.Generator | None = None,
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     dataset_results: Dict[str, Dict[str, Dict[str, float]]] = {}
     for dataset, model_paths in dataset_model_paths.items():
         print(f"\n=== Dataset: {dataset} ===")
-        dataset_results[dataset] = compute_scores_for_all_models(model_paths, device=device)
+        dataset_results[dataset] = compute_scores_for_all_models(
+            model_paths, device=device, sample_fraction=sample_fraction, rng=rng
+        )
     return dataset_results
 
 
@@ -1431,6 +1500,15 @@ if __name__ == "__main__":
         default=list(AVAILABLE_METRICS),
         help="Metrics to include when forming the combined score",
     )
+    parser.add_argument(
+        "--sample-fraction",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of train/eval embeddings to sample at random for metric computation "
+            "(0 < f <= 1)."
+        ),
+    )
     args = parser.parse_args()
 
     dataset_model_paths = {
@@ -1549,7 +1627,13 @@ if __name__ == "__main__":
             },
         },
     }
-    raw_scores = compute_scores_for_all_datasets(dataset_model_paths, device=args.device)
+    rng = torch.Generator(device="cpu")
+    raw_scores = compute_scores_for_all_datasets(
+        dataset_model_paths,
+        device=args.device,
+        sample_fraction=args.sample_fraction,
+        rng=rng,
+    )
     ground_truth_tcga = {
         "TCGA": {
             "uni": 0.4856,
