@@ -79,6 +79,7 @@ DEFAULT_GROUND_TRUTH: Dict[str, Dict[str, float]] = {
         "musk": 0.65,
         "conch": 0.58,
         "pathgen": 0.60,
+        "biomed": 0.5444,
     },
     "CAM": {
         "plip": 0.6222,
@@ -94,15 +95,44 @@ DEFAULT_GROUND_TRUTH: Dict[str, Dict[str, float]] = {
         "pathgen": 0.9433,
         "biomed": 0.8216,
     },
+    "DHMC_KID": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
+    "DHMC_LUN": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
+    "IMP": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
+    "BNCB": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
 }
 
 
 DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, str]] = {
     "TCGA": {
-        "plip": "/home/jovyan/work/tran_est/MUST/features/plip_features02.pth",
-        "musk": "/home/jovyan/work/tran_est/MUST/features/musk_features02.pth",
-        "conch": "/home/jovyan/work/tran_est/MUST/features/conch_features02.pth",
-        "pathgen": "/home/jovyan/work/tran_est/MUST/features/pathgen_features02.pth",
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi/plip_features02.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi/musk_features02.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi/conch_features02.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi/pathgen_features02.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi/biomed_features02.pth",
     },
     "CAM": {
         "plip": "/home/jovyan/work/tran_est/MUST/features_multi_cam/plip_features.pth",
@@ -112,11 +142,39 @@ DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, str]] = {
         "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_cam/biomed_features.pth",
     },
     "BACH": {
-        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_bach/plip_features03.pth",
-        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_bach/musk_features03.pth",
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_bach/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_bach/musk_features.pth",
         "conch": "/home/jovyan/work/tran_est/MUST/features_multi_bach/conch_features.pth",
-        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_bach/pathgen_features03.pth",
-        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_bach/biomed_features03.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_bach/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_bach/biomed_features.pth",
+    },
+    "DHMC_KID": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_kid/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_kid/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_kid/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_kid/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_kid/biomed_features.pth",
+    },
+    "DHMC_LUN": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_lun/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_lun/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_lun/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_lun/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_lun/biomed_features.pth",
+    },
+    "IMP": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_imp/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_imp/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_imp/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_imp/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_imp/biomed_features.pth",
+    },
+    "BNCB": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_bncb/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_bncb/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_bncb/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_bncb/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_bncb/biomed_features.pth",
     },
 }
 
