@@ -181,12 +181,40 @@ DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, str]] = {
 
 DEFAULT_SINGLE_GROUND_TRUTH: Dict[str, Dict[str, float]] = {
     "TCGA": {
-        "uni": 0.4856,
-        "conch": 0.4916,
-        "giga": 0.5108,
-        "phikon": 0.4675,
-        "virchow": 0.4952,
-    }
+        "uni": 0.5356,
+        "conch": 0.6116,
+        "giga": 0.5808,
+        "phikon": 0.5275,
+        "virchow": 0.5652,
+    },
+    "CAM": {
+        "uni": 0.6156,
+        "conch": 0.6203,
+        "giga": 0.7267,
+        "phikon": 0.7635,
+        "virchow": 0.6798,
+    },
+    "bach": {
+        "uni": 0.6628,
+        "conch": 0.5344,
+        "giga": 0.7156,
+        "phikon": 0.5744,
+        "virchow": 0.6022,
+    },
+    "bncb": {
+        "uni": 0.6628,
+        "conch": 0.6444,
+        "giga": 0.5556,
+        "phikon": 0.5344,
+        "virchow": 0.6022,
+    },
+    "histo": {
+        "uni": 0.7428,
+        "conch": 0.8344,
+        "giga": 0.6956,
+        "phikon": 0.6877,
+        "virchow": 0.7722,
+    },
 }
 
 
@@ -199,7 +227,7 @@ DEFAULT_SINGLE_DATASET_MODEL_PATHS: Dict[str, Dict[str, Dict[str, object]]] = {
                 "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
                 "region_column": "patch_id",
                 "magnification_column": "patch_scale",
-                "label_column": "label",
+                "use_labels": False,
                 "magnifications": [5, 10, 20, 40],
             },
         },
@@ -210,7 +238,7 @@ DEFAULT_SINGLE_DATASET_MODEL_PATHS: Dict[str, Dict[str, Dict[str, object]]] = {
                 "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
                 "region_column": "patch_id",
                 "magnification_column": "patch_scale",
-                "label_column": "label",
+                "use_labels": False,
                 "magnifications": [5, 10, 20, 40],
             },
         },
@@ -221,7 +249,7 @@ DEFAULT_SINGLE_DATASET_MODEL_PATHS: Dict[str, Dict[str, Dict[str, object]]] = {
                 "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
                 "region_column": "patch_id",
                 "magnification_column": "patch_scale",
-                "label_column": "label",
+                "use_labels": False,
                 "magnifications": [5, 10, 20, 40],
             },
         },
@@ -232,7 +260,7 @@ DEFAULT_SINGLE_DATASET_MODEL_PATHS: Dict[str, Dict[str, Dict[str, object]]] = {
                 "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
                 "region_column": "patch_id",
                 "magnification_column": "patch_scale",
-                "label_column": "label",
+                "use_labels": False,
                 "magnifications": [5, 10, 20, 40],
             },
         },
@@ -243,11 +271,239 @@ DEFAULT_SINGLE_DATASET_MODEL_PATHS: Dict[str, Dict[str, Dict[str, object]]] = {
                 "manifest": "/home/jovyan/work/tran_est/multires_txt02.csv",
                 "region_column": "patch_id",
                 "magnification_column": "patch_scale",
-                "label_column": "label",
+                "use_labels": False,
                 "magnifications": [5, 10, 20, 40],
             },
         },
-    }
+    },
+    "CAM": {
+        "uni": {
+            "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/uni_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/uni_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "conch": {
+            "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/conch_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/conch_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "giga": {
+            "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/giga_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/giga_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "phikon": {
+            "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/phikon_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/phikon_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "virchow": {
+            "train": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/virchow_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/feature_unimodal_cam02/virchow_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_CAM/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+    },
+    "bach": {
+        "uni": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_bach/uni_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_bach/uni_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BACH/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "conch": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_bach/conch_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_bach/conch_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BACH/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "giga": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_bach/giga_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_bach/giga_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BACH/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "phikon": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_bach/phikon_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_bach/phikon_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BACH/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "virchow": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_bach/virchow_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_bach/virchow_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BACH/output/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+    },
+    "bncb": {
+        "uni": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_bncb/uni_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_bncb/uni_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BNCB/multiscale_patches/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "conch": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_bncb/conch_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_bncb/conch_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BNCB/multiscale_patches/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "giga": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_bncb/giga_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_bncb/giga_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BNCB/multiscale_patches/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "phikon": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_bncb/phikon_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_bncb/phikon_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BNCB/multiscale_patches/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "virchow": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_bncb/virchow_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_bncb/virchow_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/data_BNCB/multiscale_patches/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+    },
+    "histo": {
+        "uni": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_histo/uni_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_histo/uni_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/patch_outputs/histo_seg/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "conch": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_histo/conch_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_histo/conch_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/patch_outputs/histo_seg/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "giga": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_histo/giga_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_histo/giga_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/patch_outputs/histo_seg/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "phikon": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_histo/phikon_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_histo/phikon_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/patch_outputs/histo_seg/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+        "virchow": {
+            "train": "/home/jovyan/work/tran_est/MUST/features_unimodal_histo/virchow_train_features.pth",
+            "eval": "/home/jovyan/work/tran_est/MUST/features_unimodal_histo/virchow_eval_features.pth",
+            "msci": {
+                "manifest": "/home/jovyan/work/tran_est/patch_outputs/histo_seg/patches.csv",
+                "region_column": "patch_id",
+                "magnification_column": "patch_scale",
+                "use_labels": False,
+                "magnifications": [5, 10, 20, 40],
+            },
+        },
+    },
 }
 
 
@@ -1178,7 +1434,8 @@ def evaluate_single_dataset(
         label_column = "subtype"
         if "msci" in config and isinstance(config["msci"], Mapping):
             manifest = config["msci"].get("manifest")
-            label_column = config["msci"].get("label_column", label_column)
+            use_labels = config["msci"].get("use_labels", True)
+            label_column = None if not use_labels else config["msci"].get("label_column", label_column)
 
         bundle = load_single_features(config["eval"], manifest, label_column)
         model_results = evaluate_metrics(
