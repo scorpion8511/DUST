@@ -99,6 +99,7 @@ def load_manifest(
         df,
         [image_column, label_column, region_column, magnification_column],
     )
+    manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
     if filter_column:
         if filter_column not in df.columns:
             raise ValueError(f"Unknown filter column: {filter_column}")
@@ -107,8 +108,40 @@ def load_manifest(
     else:
         df = df.copy()
 
+    def _resolve_path(p: str) -> str:
+        """Resolve a manifest path, respecting already-absolute entries.
+
+        The manifest occasionally mixes absolute and relative paths. When an
+        image_root is provided we should only prepend it if the manifest entry
+        is not already an absolute path that exists. If both the absolute
+        manifest entry and the image_root-prefixed version are missing, we fall
+        back to the original value so the missing-file report surfaces what the
+        user actually supplied.
+        """
+
+        if os.path.isabs(p):
+            if os.path.exists(p):
+                return p
+            # If the manifest contains an absolute path that no longer exists,
+            # try to reinterpret it relative to the provided image_root using
+            # the path tail beyond the closest shared ancestor with the
+            # manifest directory. This allows remapped dataset roots (e.g.,
+            # when manifests and images live in different base folders) to be
+            # resolved without hand-editing the CSV paths.
+            if image_root:
+                shared_prefix = os.path.commonpath([manifest_dir, p])
+                tail = os.path.relpath(p, start=shared_prefix)
+                candidate = os.path.join(image_root, tail)
+                if os.path.exists(candidate):
+                    return candidate
+        elif image_root:
+            candidate = os.path.join(image_root, p)
+            if os.path.exists(candidate):
+                return candidate
+        return p
+
     if image_root:
-        df[image_column] = df[image_column].map(lambda p: os.path.join(image_root, p))
+        df[image_column] = df[image_column].map(_resolve_path)
 
     missing_files = [p for p in df[image_column].tolist() if not os.path.exists(p)]
     if missing_files:

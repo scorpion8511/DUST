@@ -46,16 +46,102 @@ DEFAULT_GROUND_TRUTH: Dict[str, Dict[str, float]] = {
         "musk": 0.65,
         "conch": 0.58,
         "pathgen": 0.60,
-    }
+        "biomed": 0.5444,
+    },
+    "CAM": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
+    "BACH": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
+    "DHMC_KID": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
+    "DHMC_LUN": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
+    "IMP": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
+    "BNCB": {
+        "plip": 0.6222,
+        "musk": 0.6434,
+        "conch": 0.5889,
+        "pathgen": 0.5667,
+        "biomed": 0.5444,
+    },
 }
 
 DEFAULT_DATASET_MODEL_PATHS: Dict[str, Dict[str, str]] = {
     "TCGA": {
-        "plip": "/home/jovyan/work/tran_est/MUST/features/plip_features02.pth",
-        "musk": "/home/jovyan/work/tran_est/MUST/features/musk_features02.pth",
-        "conch": "/home/jovyan/work/tran_est/MUST/features/conch_features02.pth",
-        "pathgen": "/home/jovyan/work/tran_est/MUST/features/pathgen_features02.pth",
-    }
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi/plip_features02.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi/musk_features02.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi/conch_features02.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi/pathgen_features02.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi/biomed_features02.pth",
+    },
+    "CAM": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_cam/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_cam/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_cam/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_cam/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_cam/biomed_features.pth",
+    },
+    "BACH": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_bach/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_bach/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_bach/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_bach/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_bach/biomed_features.pth",
+    },
+    "DHMC_KID": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_kid/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_kid/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_kid/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_kid/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_kid/biomed_features.pth",
+    },
+    "DHMC_LUN": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_lun/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_lun/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_lun/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_lun/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_dhmc_lun/biomed_features.pth",
+    },
+    "IMP": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_imp/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_imp/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_imp/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_imp/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_imp/biomed_features.pth",
+    },
+    "BNCB": {
+        "plip": "/home/jovyan/work/tran_est/MUST/features_multi_bncb/plip_features.pth",
+        "musk": "/home/jovyan/work/tran_est/MUST/features_multi_bncb/musk_features.pth",
+        "conch": "/home/jovyan/work/tran_est/MUST/features_multi_bncb/conch_features.pth",
+        "pathgen": "/home/jovyan/work/tran_est/MUST/features_multi_bncb/pathgen_features.pth",
+        "biomed": "/home/jovyan/work/tran_est/MUST/features_multi_bncb/biomed_features.pth",
+    },
 }
 
 
@@ -232,12 +318,67 @@ def _validate_alignment(
             if patch_name is None:
                 continue
             candidates = _candidate_region_tokens(str(region_id), csv_mapping if isinstance(csv_mapping, Mapping) else {})
-            if not any(token and token in patch_name for token in candidates):
-                warnings.warn(
-                    f"Patch '{patch_name}' (magnification {mag}) does not appear to match region '{region_id}'.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+        if not any(token and token in patch_name for token in candidates):
+            warnings.warn(
+                f"Patch '{patch_name}' (magnification {mag}) does not appear to match region '{region_id}'.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+
+def _subsample_multimodal_embeddings(
+    image_embeddings: Mapping[int, torch.Tensor],
+    text_embeddings: torch.Tensor,
+    metadata: Mapping[str, object] | None,
+    *,
+    fraction: float = 0.5,
+    rng: torch.Generator | None = None,
+) -> tuple[Mapping[int, torch.Tensor], torch.Tensor, Mapping[str, object] | None]:
+    """Subsample multimodal embeddings while preserving alignment across magnifications."""
+
+    if not (0.0 < fraction < 1.0):
+        return image_embeddings, text_embeddings, metadata
+
+    total = text_embeddings.shape[0]
+    if total <= 1:
+        return image_embeddings, text_embeddings, metadata
+
+    for mag, tensor in image_embeddings.items():
+        if tensor.shape[0] != total:
+            warnings.warn(
+                "Skipping subsampling because image/text embedding counts differ across magnifications.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return image_embeddings, text_embeddings, metadata
+
+    keep = max(1, int(round(total * fraction)))
+    if keep >= total:
+        return image_embeddings, text_embeddings, metadata
+
+    indices = torch.randperm(total, generator=rng)[:keep]
+    subset_images = {mag: tensor[indices] for mag, tensor in image_embeddings.items()}
+    subset_text = text_embeddings[indices]
+
+    subset_metadata: Mapping[str, object] | None = None
+    if metadata:
+        subset_metadata = dict(metadata)
+        idx_list = indices.tolist()
+        for key in ("region_ids", "labels"):
+            values = metadata.get(key)
+            if isinstance(values, Sequence) and len(values) == total:
+                subset_metadata[key] = [values[i] for i in idx_list]
+
+        patches = metadata.get("patches") if isinstance(metadata, Mapping) else None
+        if isinstance(patches, Mapping):
+            new_patches: dict[int, list[object]] = {}
+            for mag, values in patches.items():
+                if isinstance(values, Sequence) and len(values) == total:
+                    new_patches[int(mag)] = [values[i] for i in idx_list]
+            subset_metadata["patches"] = new_patches
+
+    print(f"Subsampled {keep}/{total} rows (~{keep/total:.1%}) for multimodal metrics.")
+    return subset_images, subset_text, subset_metadata
 
 
 def _max_variance(num_magnifications: int) -> float:
@@ -284,6 +425,8 @@ def compute_msci(
     if not mags:
         raise ValueError("At least one magnification is required to compute MSCI.")
 
+    single_magnification = len(mags) == 1
+
     text_norm = F.normalize(text_embeddings, dim=-1)
     similarities = []
     for mag in mags:
@@ -297,11 +440,23 @@ def compute_msci(
         similarities.append(torch.sum(img * text_norm, dim=-1))
 
     sim_tensor = torch.stack(similarities, dim=-1)
+    if single_magnification:
+        # When only a single magnification is supplied we cannot measure
+        # cross-scale variance directly.  Instead of duplicating the column –
+        # which would always yield zero variance – compare every similarity
+        # value against the dataset-wide prototype obtained from the mean
+        # similarity.  This mirrors the single-scale fallback in the
+        # unimodal scoring pipeline where each patch is contrasted with the
+        # region centroid.
+        base = sim_tensor.squeeze(-1)
+        global_mean = base.mean()
+        reference = torch.full_like(base, global_mean)
+        sim_tensor = torch.stack([base, reference], dim=-1)
     mean_sim = sim_tensor.mean(dim=-1, keepdim=True)
     variance = torch.mean((sim_tensor - mean_sim) ** 2, dim=-1)
     mean_variance = variance.mean().item()
 
-    max_var = _max_variance(len(mags))
+    max_var = _max_variance(sim_tensor.shape[-1])
     if max_var <= 0:
         msci_score = 0.0
     else:
@@ -448,7 +603,25 @@ def _summarise_for_json(msci_result: MSCIResult, cmi_results: Dict[int, CMILBRes
 def _compute_weighted_kendall_tau(
     scores: Dict[str, float], ground_truth: Dict[str, float]
 ) -> Optional[float]:
-    """Compute weighted Kendall tau between predictions and ground truth."""
+    r"""Compute the weighted Kendall :math:`\tau_w` correlation.
+
+    The implementation delegates to :func:`scipy.stats.weightedtau`, which
+    follows the formulation introduced by Shieh (1998).  Given paired score
+    vectors :math:`x` and :math:`y`, every observation carries a weight
+    :math:`w_i` (unity in this pipeline) and every pair :math:`(i, j)` with
+    :math:`i < j` receives the product :math:`w_i w_j`.  The statistic is
+    expressed as
+
+    .. math::
+
+        \tau_w = \frac{P - Q}{\sqrt{(P + Q + T)(P + Q + U)}} ,
+
+    where :math:`P` and :math:`Q` accumulate the weighted counts of concordant
+    and discordant pairs respectively, :math:`T` accounts for pairs tied only in
+    :math:`x`, and :math:`U` accounts for pairs tied only in :math:`y`.  When no
+    overlap exists between the prediction and ground-truth keys the function
+    returns ``None``.
+    """
 
     overlap = [name for name in scores if name in ground_truth]
     if len(overlap) < 2:
@@ -458,6 +631,105 @@ def _compute_weighted_kendall_tau(
     truth = [ground_truth[name] for name in overlap]
     tau, _ = weightedtau(predictions, truth)
     return float(tau)
+
+
+def _report_combined_ranking(
+    dataset: str,
+    scores: Mapping[str, Mapping[str, float]],
+    *,
+    key: str,
+) -> None:
+    """Print the combined score ordering used for Kendall tau."""
+
+    entries: list[tuple[str, float]] = []
+    for name, payload in scores.items():
+        try:
+            entries.append((name, float(payload[key])))
+        except (TypeError, KeyError, ValueError):
+            continue
+
+    if entries:
+        print(
+            f"Combined ranking for {dataset} using '{key}' (used for Kendall tau):"
+        )
+        for name, value in sorted(entries, key=lambda kv: kv[1], reverse=True):
+            print(f"  {name}: {value:.6f}")
+
+
+def _compute_topk_probabilities(
+    dataset_scores: Dict[str, Dict[str, Dict[str, float]]],
+    ground_truth: Dict[str, Dict[str, float]],
+    *,
+    combined_key: str,
+    ks: Sequence[int] = (1, 2, 3),
+) -> tuple[Dict[str, Dict[int, float]], Dict[int, float]]:
+    """Evaluate :math:`Pr(\text{top-}k)` for each dataset and aggregate mean."""
+
+    ks = tuple(sorted({int(k) for k in ks if k > 0}))
+    dataset_probs: Dict[str, Dict[int, float]] = {}
+    aggregate: Dict[int, list[float]] = {k: [] for k in ks}
+
+    for dataset, model_scores in dataset_scores.items():
+        gt = ground_truth.get(dataset)
+        if not gt:
+            continue
+        filtered: list[tuple[str, float]] = []
+        for model, scores in model_scores.items():
+            if model not in gt:
+                continue
+            combined_val = scores.get(combined_key)
+            if combined_val is None:
+                continue
+            filtered.append((model, float(combined_val)))
+        if not filtered:
+            continue
+
+        gt_subset = {model: gt[model] for model, _ in filtered}
+        max_acc = max(gt_subset.values())
+        top_models = {
+            model for model, acc in gt_subset.items() if np.isclose(acc, max_acc)
+        }
+        if not top_models:
+            continue
+
+        ordered = sorted(filtered, key=lambda item: (-item[1], item[0]))
+        dataset_result: Dict[int, float] = {}
+        for k in ks:
+            topk_models = {model for model, _ in ordered[:k]}
+            hit = float(bool(top_models & topk_models))
+            dataset_result[k] = hit
+            aggregate[k].append(hit)
+        if dataset_result:
+            dataset_probs[dataset] = dataset_result
+
+    global_probs = {
+        k: float(np.mean(values)) for k, values in aggregate.items() if values
+    }
+    return dataset_probs, global_probs
+
+
+def _report_topk_probabilities(
+    dataset_probs: Dict[str, Dict[int, float]],
+    global_probs: Dict[int, float],
+    *,
+    descriptor: str,
+) -> None:
+    """Print :math:`Pr(\text{top-}k)` summaries for the combined ranking."""
+
+    print(f"Pr(topk) for {descriptor} ranking:")
+    if not dataset_probs:
+        print("  (no datasets with overlapping models)")
+    else:
+        for dataset in sorted(dataset_probs):
+            parts = ", ".join(
+                f"top{k}={prob:.3f}" for k, prob in sorted(dataset_probs[dataset].items())
+            )
+            print(f"  {dataset}: {parts}")
+    if global_probs:
+        parts = ", ".join(
+            f"top{k}={prob:.3f}" for k, prob in sorted(global_probs.items())
+        )
+        print(f"  Aggregate mean: {parts}")
 
 
 def _load_ground_truth(path: Optional[str]) -> Dict[str, Dict[str, float]]:
@@ -473,208 +745,441 @@ def _load_ground_truth(path: Optional[str]) -> Dict[str, Dict[str, float]]:
     }
 
 
+def _normalise_dataset_argument(
+    dataset: Optional[Sequence[str] | str],
+) -> Tuple[str, ...]:
+    """Normalise dataset CLI arguments into a tuple of dataset identifiers."""
+
+    if dataset is None:
+        return tuple(DEFAULT_GROUND_TRUTH.keys())
+
+    if isinstance(dataset, str):
+        parts = [item.strip() for item in dataset.split(",") if item.strip()]
+        return tuple(parts) if parts else tuple(DEFAULT_GROUND_TRUTH.keys())
+
+    normalised: list[str] = []
+    for item in dataset:
+        if item is None:
+            continue
+        for part in str(item).split(","):
+            part = part.strip()
+            if part and part not in normalised:
+                normalised.append(part)
+
+    if not normalised:
+        return tuple(DEFAULT_GROUND_TRUTH.keys())
+
+    return tuple(normalised)
+
+
 def _optimise_combined_scores(
-    collected_scores: Dict[str, Dict[str, float]],
-    ground_truth: Mapping[str, float],
+    per_dataset_scores: Mapping[str, Mapping[str, Mapping[str, float]]],
+    dataset_truths: Mapping[str, Mapping[str, float]],
     search_space: Sequence[float],
-) -> Optional[Tuple[Tuple[float, float], float, Dict[str, float]]]:
-    """Search for the best linear combination of MSCI and CMI-LB metrics."""
+) -> Optional[
+    Tuple[Tuple[float, float], Dict[str, float], Dict[str, Dict[str, float]], float]
+]:
+    """Grid-search a single global MSCI/CMI-LB blend across all datasets."""
 
-    if not collected_scores:
+    if not per_dataset_scores or not dataset_truths:
         return None
 
-    model_names = list(collected_scores.keys())
-    msci_values = np.array([collected_scores[name]["msci"] for name in model_names], dtype=float)
-    cmi_values = np.array([collected_scores[name]["cmi_lb_mean"] for name in model_names], dtype=float)
-
-    msci_std = msci_values.std()
-    cmi_std = cmi_values.std()
-    msci_norm = (msci_values - msci_values.mean()) / (msci_std if msci_std else 1.0)
-    cmi_norm = (cmi_values - cmi_values.mean()) / (cmi_std if cmi_std else 1.0)
-
-    overlap = [name for name in model_names if name in ground_truth]
-    if len(overlap) < 2:
+    weight_candidates = list(search_space)
+    if not weight_candidates:
         return None
 
-    overlap_idx = np.array([model_names.index(name) for name in overlap], dtype=int)
-    msci_overlap = msci_norm[overlap_idx]
-    cmi_overlap = cmi_norm[overlap_idx]
-    truth = np.array([ground_truth[name] for name in overlap], dtype=float)
+    all_msci: list[float] = []
+    all_cmi: list[float] = []
+    for dataset_scores in per_dataset_scores.values():
+        for score_payload in dataset_scores.values():
+            try:
+                all_msci.append(float(score_payload["msci"]))
+                all_cmi.append(float(score_payload["cmi_lb_mean"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    if not all_msci or not all_cmi:
+        return None
+
+    msci_mean = float(np.mean(all_msci))
+    msci_std = float(np.std(all_msci)) or 1.0
+    cmi_mean = float(np.mean(all_cmi))
+    cmi_std = float(np.std(all_cmi)) or 1.0
+
+    entries: list[tuple[str, str, float, float, float]] = []
+    dataset_indices: Dict[str, list[int]] = {}
+
+    for dataset, truth_map in dataset_truths.items():
+        scores = per_dataset_scores.get(dataset)
+        if not scores:
+            continue
+        for model_name, truth_value in truth_map.items():
+            model_scores = scores.get(model_name)
+            if not model_scores:
+                continue
+            try:
+                msci_val = float(model_scores["msci"])
+                cmi_val = float(model_scores["cmi_lb_mean"])
+                truth_val = float(truth_value)
+            except (KeyError, TypeError, ValueError):
+                continue
+            entry_index = len(entries)
+            entries.append((dataset, model_name, truth_val, msci_val, cmi_val))
+            dataset_indices.setdefault(dataset, []).append(entry_index)
+
+    if len(entries) < 2:
+        return None
+
+    truths = np.array([item[2] for item in entries], dtype=float)
+    msci_values = np.array([item[3] for item in entries], dtype=float)
+    cmi_values = np.array([item[4] for item in entries], dtype=float)
+
+    msci_norm = (msci_values - msci_mean) / msci_std
+    cmi_norm = (cmi_values - cmi_mean) / cmi_std
 
     best_tau = float("-inf")
     best_weights: Tuple[float, float] = (0.0, 0.0)
+    best_dataset_taus: Dict[str, float] = {}
 
-    for w_msci in search_space:
-        for w_cmi in search_space:
+    for w_msci in weight_candidates:
+        for w_cmi in weight_candidates:
             if abs(w_msci) < 1e-12 and abs(w_cmi) < 1e-12:
                 continue
-            combined = w_msci * msci_overlap + w_cmi * cmi_overlap
-            tau, _ = weightedtau(combined, truth)
+
+            combined = float(w_msci) * msci_norm + float(w_cmi) * cmi_norm
+            tau, _ = weightedtau(combined, truths)
             if math.isnan(tau):
                 continue
+
+            dataset_tau_map: Dict[str, float] = {}
+            for dataset, indices in dataset_indices.items():
+                if len(indices) < 2:
+                    continue
+                dataset_preds = combined[indices]
+                dataset_truths_arr = truths[indices]
+                dataset_tau, _ = weightedtau(dataset_preds, dataset_truths_arr)
+                if math.isnan(dataset_tau):
+                    continue
+                dataset_tau_map[dataset] = float(dataset_tau)
+
             if tau > best_tau:
                 best_tau = float(tau)
                 best_weights = (float(w_msci), float(w_cmi))
+                best_dataset_taus = dataset_tau_map
 
     if best_tau == float("-inf"):
         return None
 
-    combined_all = best_weights[0] * msci_norm + best_weights[1] * cmi_norm
-    combined_scores = {
-        model: float(score) for model, score in zip(model_names, combined_all)
-    }
+    combined_scores: Dict[str, Dict[str, float]] = {}
+    for dataset, scores in per_dataset_scores.items():
+        combined_scores[dataset] = {}
+        for model_name, payload in scores.items():
+            try:
+                msci_val = float(payload["msci"])
+                cmi_val = float(payload["cmi_lb_mean"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            msci_component = (msci_val - msci_mean) / msci_std
+            cmi_component = (cmi_val - cmi_mean) / cmi_std
+            combined_scores[dataset][model_name] = float(
+                best_weights[0] * msci_component + best_weights[1] * cmi_component
+            )
 
-    return best_weights, best_tau, combined_scores
+    print(
+        "Optimized global weights: "
+        f"(w_msci={best_weights[0]:.3f}, w_cmi={best_weights[1]:.3f}) -> tau={best_tau:.6f}"
+    )
+
+    return best_weights, best_dataset_taus, combined_scores, best_tau
 
 
 def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     device = torch.device(args.device)
-    aggregated_results: Dict[str, object] = {}
-    json_payload: Dict[str, object] = {}
-    collected_scores: Dict[str, Dict[str, float]] = {}
+    aggregated_results: Dict[str, Dict[str, object]] = {}
+    json_payload: Dict[str, Dict[str, object]] = {}
+    collected_scores: Dict[str, Dict[str, Dict[str, float]]] = {}
+    rng = torch.Generator(device="cpu")
 
-    dataset_map = DEFAULT_DATASET_MODEL_PATHS.get(args.dataset, {})
-    entries: list[tuple[str, str]] = []
+    requested_datasets = _normalise_dataset_argument(args.dataset)
+    multi_dataset = len(requested_datasets) > 1
+
+    entries_by_dataset: Dict[str, list[tuple[str, str]]] = {}
 
     if args.features:
+        dataset_for_features: Optional[str] = None
+        for candidate in requested_datasets:
+            if candidate in DEFAULT_DATASET_MODEL_PATHS:
+                dataset_for_features = candidate
+                break
+        if dataset_for_features is None and DEFAULT_DATASET_MODEL_PATHS:
+            dataset_for_features = next(iter(DEFAULT_DATASET_MODEL_PATHS))
+
+        dataset_key = dataset_for_features or "custom"
+        dataset_map = DEFAULT_DATASET_MODEL_PATHS.get(dataset_for_features or "", {})
         reverse_lookup = {
             str(Path(path).expanduser().resolve()): model_name
             for model_name, path in dataset_map.items()
         }
+        feature_entries: list[tuple[str, str]] = []
         for feature_path in args.features:
             resolved = str(Path(feature_path).expanduser().resolve())
             model_name = reverse_lookup.get(resolved, Path(feature_path).stem)
-            entries.append((model_name, feature_path))
+            feature_entries.append((model_name, feature_path))
+        entries_by_dataset[dataset_key] = feature_entries
     else:
-        if not dataset_map:
-            raise ValueError(
-                "No feature paths provided and no default dataset entries available for the requested dataset."
-            )
-        entries.extend(dataset_map.items())
+        for dataset in requested_datasets:
+            dataset_map = DEFAULT_DATASET_MODEL_PATHS.get(dataset)
+            if not dataset_map:
+                continue
+            entries_by_dataset[dataset] = list(dataset_map.items())
 
-    for model_name, feature_path in entries:
-        print(f"\n=== Evaluating {model_name}: {feature_path} ===")
-        (
-            image_embeddings,
-            text_embeddings,
-            metadata,
-            stored_magnifications,
-        ) = load_multimodal_embeddings(feature_path, device)
+        if not entries_by_dataset and DEFAULT_DATASET_MODEL_PATHS:
+            dataset, dataset_map = next(iter(DEFAULT_DATASET_MODEL_PATHS.items()))
+            entries_by_dataset[dataset] = list(dataset_map.items())
 
-        _validate_alignment(metadata, image_embeddings, text_embeddings)
-
-        if args.magnifications:
-            magnifications = list(args.magnifications)
-        elif stored_magnifications:
-            magnifications = [mag for mag in stored_magnifications if mag in image_embeddings]
-            if not magnifications:
-                magnifications = list(sorted(image_embeddings.keys()))
-        else:
-            magnifications = list(sorted(image_embeddings.keys()))
-
-        msci_result = compute_msci(image_embeddings, text_embeddings, magnifications)
-        cmi_results = compute_cmi_lb_across_magnifications(
-            image_embeddings,
-            text_embeddings,
-            magnifications,
-            args.temperature,
-            min_temperature=args.min_temperature,
-            max_temperature=args.max_temperature,
-            temperature_steps=args.temperature_steps,
+    if not entries_by_dataset:
+        raise ValueError(
+            "No feature paths provided and no default dataset entries available for the requested dataset(s)."
         )
 
-        cmi_avg = float(sum(r.cmi_lb for r in cmi_results.values()) / len(cmi_results))
+    multi_dataset_features = len(entries_by_dataset) > 1
 
-        collected_scores[model_name] = {
-            "msci": float(msci_result.msci),
-            "cmi_lb_mean": cmi_avg,
-            "cmi_lb_per_mag": {mag: float(cmi_results[mag].cmi_lb) for mag in magnifications},
-        }
-
-        print("--- MSCI ---")
-        print(f"MSCI score: {msci_result.msci:.6f} (normalised by max variance {msci_result.max_variance:.6f})")
-        print(f"Mean variance: {msci_result.mean_variance:.6f}")
-        print("Per-region variance (first 10 values):")
-        preview = msci_result.per_region_variance[:10].cpu().numpy()
-        print(preview)
-
-        print("\n--- CMI-LB ---")
-        for mag in magnifications:
-            result = cmi_results[mag]
+    for dataset_name, entries in entries_by_dataset.items():
+        if multi_dataset_features:
+            print(f"\n### Dataset: {dataset_name}")
+        for model_name, feature_path in entries:
             print(
-                f"Magnification {mag}x -> CMI-LB: {result.cmi_lb:.6f} (Lx={result.loss_x:.6f}, Ly={result.loss_y:.6f})"
+                f"\n=== Evaluating {model_name} ({dataset_name}): {feature_path} ==="
             )
-        print(f"Average CMI-LB across magnifications: {cmi_avg:.6f}")
+            (
+                image_embeddings,
+                text_embeddings,
+                metadata,
+                stored_magnifications,
+            ) = load_multimodal_embeddings(feature_path, device)
 
-        aggregated_results[feature_path] = {
-            "msci": msci_result,
-            "cmi_lb": cmi_results,
-            "cmi_lb_mean": cmi_avg,
-        }
+            (
+                image_embeddings,
+                text_embeddings,
+                metadata,
+            ) = _subsample_multimodal_embeddings(
+                image_embeddings,
+                text_embeddings,
+                metadata,
+                fraction=args.sample_fraction,
+                rng=rng,
+            )
 
-        if args.json:
-            json_payload[feature_path] = _summarise_for_json(msci_result, cmi_results, cmi_avg)
+            _validate_alignment(metadata, image_embeddings, text_embeddings)
+
+            if args.magnifications:
+                magnifications = list(args.magnifications)
+            elif stored_magnifications:
+                magnifications = [mag for mag in stored_magnifications if mag in image_embeddings]
+                if not magnifications:
+                    magnifications = list(sorted(image_embeddings.keys()))
+            else:
+                magnifications = list(sorted(image_embeddings.keys()))
+
+            msci_result = compute_msci(image_embeddings, text_embeddings, magnifications)
+            cmi_results = compute_cmi_lb_across_magnifications(
+                image_embeddings,
+                text_embeddings,
+                magnifications,
+                args.temperature,
+                min_temperature=args.min_temperature,
+                max_temperature=args.max_temperature,
+                temperature_steps=args.temperature_steps,
+            )
+
+            cmi_avg = float(sum(r.cmi_lb for r in cmi_results.values()) / len(cmi_results))
+
+            collected_scores.setdefault(dataset_name, {})[model_name] = {
+                "msci": float(msci_result.msci),
+                "cmi_lb_mean": cmi_avg,
+                "cmi_lb_per_mag": {
+                    mag: float(cmi_results[mag].cmi_lb) for mag in magnifications
+                },
+            }
+
+            print("--- MSCI ---")
+            print(f"MSCI score: {msci_result.msci:.6f} (normalised by max variance {msci_result.max_variance:.6f})")
+            print(f"Mean variance: {msci_result.mean_variance:.6f}")
+            print("Per-region variance (first 10 values):")
+            preview = msci_result.per_region_variance[:10].cpu().numpy()
+            print(preview)
+
+            print("\n--- CMI-LB ---")
+            for mag in magnifications:
+                result = cmi_results[mag]
+                print(
+                    f"Magnification {mag}x -> CMI-LB: {result.cmi_lb:.6f} (Lx={result.loss_x:.6f}, Ly={result.loss_y:.6f})"
+                )
+            print(f"Average CMI-LB across magnifications: {cmi_avg:.6f}")
+
+            aggregated_results.setdefault(dataset_name, {})[feature_path] = {
+                "msci": msci_result,
+                "cmi_lb": cmi_results,
+                "cmi_lb_mean": cmi_avg,
+            }
+
+            if args.json:
+                json_payload.setdefault(dataset_name, {})[feature_path] = _summarise_for_json(
+                    msci_result, cmi_results, cmi_avg
+                )
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
             json.dump(json_payload, handle, indent=2)
 
     ground_truth = _load_ground_truth(args.ground_truth)
-    dataset = args.dataset
-    if collected_scores and dataset in ground_truth:
-        gt = ground_truth[dataset]
-        msci_tau = _compute_weighted_kendall_tau(
-            {name: scores["msci"] for name, scores in collected_scores.items()}, gt
-        )
-        if msci_tau is not None:
-            print(
-                f"Kendall tau_w (MSCI vs ground truth) for {dataset}: {msci_tau:.6f}"
-            )
-        cmi_tau = _compute_weighted_kendall_tau(
-            {name: scores["cmi_lb_mean"] for name, scores in collected_scores.items()}, gt
-        )
-        if cmi_tau is not None:
-            print(
-                f"Kendall tau_w (CMI-LB mean vs ground truth) for {dataset}: {cmi_tau:.6f}"
-            )
+    search_space = np.linspace(args.weight_min, args.weight_max, args.weight_steps)
 
-        optimisation = _optimise_combined_scores(
+    joint_optimisation = None
+    combined_label = "combined"
+
+    if collected_scores:
+        dataset_truths = {
+            dataset: gt
+            for dataset in requested_datasets
+            if (gt := ground_truth.get(dataset))
+            if isinstance(gt, Mapping) and gt
+        }
+
+        joint_optimisation = _optimise_combined_scores(
             collected_scores,
-            gt,
-            np.linspace(args.weight_min, args.weight_max, args.weight_steps),
+            dataset_truths,
+            search_space,
         )
-        if optimisation is not None:
-            weights, combined_tau, combined_scores = optimisation
+
+        if joint_optimisation is not None:
+            (
+                weights,
+                dataset_taus,
+                combined_scores,
+                global_tau,
+            ) = joint_optimisation
+            descriptor = (
+                "Optimal global combined weights"
+                if multi_dataset
+                else "Optimal combined weights"
+            )
             print(
-                "Optimal combined weights (w_msci={:.3f}, w_cmi={:.3f}) -> Kendall tau_w={:.6f}".format(
-                    weights[0], weights[1], combined_tau
+                f"{descriptor} (w_msci={weights[0]:.3f}, w_cmi={weights[1]:.3f})"
+            )
+            if math.isfinite(global_tau):
+                scope = "all datasets" if multi_dataset else "dataset overlap"
+                print(
+                    f"Global Kendall tau_w across {scope}: {global_tau:.6f}"
                 )
+            combined_label = "combined_global" if multi_dataset else "combined"
+            for dataset_name, dataset_scores in combined_scores.items():
+                prefix = (
+                    f"Combined weighted scores for {dataset_name}:"
+                    if multi_dataset
+                    else "Combined weighted scores:"
+                )
+                if dataset_scores:
+                    print(prefix)
+                for name, value in dataset_scores.items():
+                    collected_scores.setdefault(dataset_name, {}).setdefault(name, {})[
+                        combined_label
+                    ] = float(value)
+                    print(f"  {name}: {value:.6f}")
+
+        if joint_optimisation is not None:
+            descriptor = (
+                "global combined" if multi_dataset else "combined"
             )
-            print("Combined weighted scores:")
-            for name, value in combined_scores.items():
-                collected_scores[name]["combined"] = value
-                print(f"  {name}: {value:.6f}")
-        else:
-            print(
-                "Unable to derive combined MSCI/CMI-LB weights for benchmarking; insufficient ground-truth overlap."
+            topk_dataset, topk_global = _compute_topk_probabilities(
+                collected_scores,
+                dataset_truths,
+                combined_key=combined_label,
+            )
+            _report_topk_probabilities(
+                topk_dataset,
+                topk_global,
+                descriptor=descriptor,
             )
 
-        # Evaluate per-magnification CMI-LB correlations
-        per_mag_scores: Dict[int, Dict[str, float]] = {}
-        for name, scores in collected_scores.items():
-            per_mag = scores.get("cmi_lb_per_mag", {})
-            if not isinstance(per_mag, Mapping):
-                continue
-            for mag, value in per_mag.items():
-                per_mag_scores.setdefault(int(mag), {})[name] = float(value)
+        combined_key = combined_label if joint_optimisation is not None else None
 
-        for mag in sorted(per_mag_scores):
-            tau_mag = _compute_weighted_kendall_tau(per_mag_scores[mag], gt)
-            if tau_mag is None:
+        for dataset in requested_datasets:
+            gt = ground_truth.get(dataset)
+            if not gt:
+                warnings.warn(
+                    f"No ground-truth accuracies found for dataset '{dataset}'. Skipping benchmarking.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 continue
-            print(
-                f"Kendall tau_w (CMI-LB at {mag}x vs ground truth) for {dataset}: {tau_mag:.6f}"
+
+            dataset_scores = collected_scores.get(dataset)
+            if not dataset_scores:
+                warnings.warn(
+                    f"No computed scores available for dataset '{dataset}'. Skipping benchmarking.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
+
+            if combined_key is not None:
+                _report_combined_ranking(
+                    dataset, dataset_scores, key=combined_key
+                )
+
+            msci_tau = _compute_weighted_kendall_tau(
+                {name: scores["msci"] for name, scores in dataset_scores.items()}, gt
             )
+            if msci_tau is not None:
+                print(
+                    f"Kendall tau_w (MSCI vs ground truth) for {dataset}: {msci_tau:.6f}"
+                )
+            cmi_tau = _compute_weighted_kendall_tau(
+                {name: scores["cmi_lb_mean"] for name, scores in dataset_scores.items()}, gt
+            )
+            if cmi_tau is not None:
+                print(
+                    f"Kendall tau_w (CMI-LB mean vs ground truth) for {dataset}: {cmi_tau:.6f}"
+                )
+
+            if joint_optimisation is not None:
+                weights, dataset_taus, _, _ = joint_optimisation
+                tau_value = dataset_taus.get(dataset)
+                if tau_value is not None:
+                    descriptor = (
+                        "global combined weights"
+                        if multi_dataset
+                        else "combined weights"
+                    )
+                    print(
+                        f"Kendall tau_w ({descriptor} vs ground truth) for {dataset}: {tau_value:.6f}"
+                    )
+                else:
+                    print(
+                        "Unable to derive combined MSCI/CMI-LB weights for benchmarking; insufficient ground-truth overlap."
+                    )
+            else:
+                print(
+                    "Unable to derive combined MSCI/CMI-LB weights for benchmarking; insufficient ground-truth overlap."
+                )
+
+            # Evaluate per-magnification CMI-LB correlations
+            per_mag_scores: Dict[int, Dict[str, float]] = {}
+            for name, scores in dataset_scores.items():
+                per_mag = scores.get("cmi_lb_per_mag", {})
+                if not isinstance(per_mag, Mapping):
+                    continue
+                for mag, value in per_mag.items():
+                    per_mag_scores.setdefault(int(mag), {})[name] = float(value)
+
+            for mag in sorted(per_mag_scores):
+                tau_mag = _compute_weighted_kendall_tau(per_mag_scores[mag], gt)
+                if tau_mag is None:
+                    continue
+                print(
+                    f"Kendall tau_w (CMI-LB at {mag}x vs ground truth) for {dataset}: {tau_mag:.6f}"
+                )
 
     return aggregated_results
 
@@ -696,6 +1201,12 @@ def build_argparser() -> argparse.ArgumentParser:
         type=str,
         default="cpu",
         help="Device for computation (e.g. 'cpu', 'cuda:0').",
+    )
+    parser.add_argument(
+        "--sample-fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of embeddings to sample at random for scoring (0 < f <= 1).",
     )
     parser.add_argument(
         "--magnifications",
@@ -743,26 +1254,30 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset",
         type=str,
-        default="TCGA",
-        help="Dataset key used to select ground-truth accuracies.",
+        nargs="+",
+        default=None,
+        help=(
+            "Dataset key(s) used to select ground-truth accuracies. Provide multiple names "
+            "separated by spaces or commas to benchmark against several datasets (defaults to all available)."
+        ),
     )
     parser.add_argument(
         "--weight-min",
         type=float,
         default=-1.0,
-        help="Minimum weight value when searching MSCI/CMI-LB combinations.",
+        help="Minimum MSCI weight value when searching the shared combination.",
     )
     parser.add_argument(
         "--weight-max",
         type=float,
         default=1.0,
-        help="Maximum weight value when searching MSCI/CMI-LB combinations.",
+        help="Maximum MSCI weight value when searching the shared combination.",
     )
     parser.add_argument(
         "--weight-steps",
         type=int,
         default=41,
-        help="Number of grid points per axis for the combined weight search.",
+        help="Number of grid points to evaluate when searching the shared weight.",
     )
     return parser
 

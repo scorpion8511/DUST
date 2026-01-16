@@ -61,7 +61,12 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from PIL import Image
+from PIL import Image, PngImagePlugin
+
+# Some PNG manifests contain very large embedded ICC/text chunks. The Pillow
+# default (1 MiB) can reject otherwise valid tiles, so relax the limit
+# moderately to allow these patches to load while still bounding memory usage.
+PngImagePlugin.MAX_TEXT_CHUNK = 32 * 1024 * 1024
 
 
 DEFAULT_IMAGE_SIZE = 224

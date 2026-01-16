@@ -50,6 +50,22 @@ HoI, and MSCI metrics (falling back to the first two when MSCI is
 unavailable) before reporting per-dataset Kendall τ correlations with
 ground-truth accuracy.
 
+The Gabor Energy metric measures how much diagnostically useful texture a
+representation retains by first reshaping embeddings into square “token images,”
+filtering them with an oriented, band-pass Gabor bank, and taking the magnitude
+of the complex responses. These magnitudes are z-scored, optionally reduced with
+PCA, and passed through a linear discriminant analysis (LDA) head fitted on the
+training split; the final energy score is the log-sum-exp of the resulting LDA
+logits on the evaluation split. This aligns the metric with the code in
+`gabor_eng.py`, where the meaningful signal comes from the discriminative power
+of the Gabor responses rather than simply pooling their squared amplitudes.
+
+Interpretation tips for the Gabor energy diagrams (how to read dense,
+overlapping bars and relate them to accuracy) live in
+`gabor_energy_analysis.md` alongside the plotting utility
+`gabor_energy_diagram.py`. Start there if you are looking for narrative
+guidance on which models the histograms indicate as texture-rich.
+
 ### MSCI for single-modality embeddings
 
 In addition to the Gabor/Fisher metrics, the scoring pipeline can now
@@ -354,11 +370,17 @@ pipelines.
 
 `multimodal_scoring.py` implements the Magnification-Scale Consistency
 Index (MSCI) and a cross-modal mutual information lower bound (CMI-LB)
-for paired image/text embeddings stored in `.pth` files. Each feature
-file must contain a `text_embeddings` tensor and an
-`image_embeddings` dictionary mapping magnification levels (e.g. 5/10/20)
-to the corresponding image feature tensors. To evaluate one or more
-feature sets, run:
+for paired image/text embeddings stored in `.pth` files. CMI-LB is the
+same symmetric InfoNCE objective used elsewhere in the codebase: for
+each magnification, logits = `image_embeddings @ text_embeddingsᵀ / τ`
+feed two log-softmax terms (image→text and text→image), and the mean of
+`log(N) – CE` across the two directions yields the lower bound on
+mutual information. Because each magnification is scored independently
+then averaged, the value directly reflects cross-scale semantic
+alignment between the vision and text encoders. Each feature file must
+contain a `text_embeddings` tensor and an `image_embeddings` dictionary
+mapping magnification levels (e.g. 5/10/20) to the corresponding image
+feature tensors. To evaluate one or more feature sets, run:
 
 ```bash
 python multimodal_scoring.py /path/to/plip_features.pth /path/to/musk_features.pth \
